@@ -1,6 +1,6 @@
 import sys
 import csv
-from datetime import timedelta
+from datetime import timedelta, timezone, datetime
 from typing import Optional
 from dataclasses import dataclass
 from scamper import ScamperCtrl, ScamperFile
@@ -41,6 +41,8 @@ class MeasurementRecord:
 
 
 def get_wt_region(latitude, longitude, token, signal_type="co2_moer"):
+    """Get the WattTime region for a given latitude and longitude.
+    """
     headers = {"Authorization": f"Bearer {token}"}
     params = {"latitude": str(latitude), "longitude": str(longitude), "signal_type": signal_type}
     response = requests.get(region_url, headers=headers, params=params)
@@ -48,18 +50,31 @@ def get_wt_region(latitude, longitude, token, signal_type="co2_moer"):
     region = response.json()['region']
     return region
 
-def get_current_ci(latitude, longitude, token, signal_type="co2_moer"):
+
+def fetch_current_signal(latitude, longitude, token, signal_type="co2_moer", offset_hours=1):
+    """
+    Fetch the most recent historical signal data for a given location and time offset.
+    Returns a list of signal values for the specified offset hours.
+    """
+
     region = get_wt_region(latitude, longitude, token, signal_type=signal_type)
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    start_time = (now - timedelta(hours=offset_hours)).isoformat()
+    end_time = now.isoformat()
 
     headers = {"Authorization": f"Bearer {token}"}
     params = {
         "region": region,
+        "start": start_time,
+        "end": end_time,
         "signal_type": signal_type,
     }
-    response = requests.get(current_url, headers=headers, params=params)
+    response = requests.get(df_historical_url, headers=headers, params=params)
     response.raise_for_status()
-    current = response.json()['data'][0]
-    return current['value']
+    data = response.json().get('data', [])
+    # Return the list of 'value' entries when present, otherwise return None
+    values = [item['value'] if isinstance(item, dict) and 'value' in item else None for item in data]
+    return values
 
 
 def export_results_to_csv(ip_results, filename="results.csv"):
@@ -96,7 +111,7 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", se
     vps = [vp for vp in ctrl.vps() if 'primitive:dns' in vp.tags]
     vp_lookup = {vp.name: vp for vp in vps} 
     print(f"Total DNS-capable VPs: {len(vps)}")
-    # vps = vps[:2]  # Limit to first n VPs for testing
+    vps = vps[:2]  # Limit to first n VPs for testing
     ctrl.add_vps(vps)
 
     # 1. DNS A records
@@ -144,10 +159,20 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", se
             try:
                 details = handler.getDetails(str(ip))
                 latitude, longitude = details.latitude, details.longitude
-                ci = get_current_ci(latitude, longitude, TOKEN, signal_type="co2_moer")
+                ci_list_recent = fetch_current_signal(latitude, longitude, TOKEN, signal_type="co2_moer", offset_hours=1)
+                
+                # pick the most recent non-None value
+                ci = None
+                if ci_list_recent:
+                    for val in reversed(ci_list_recent):
+                        if val is not None:
+                            ci = val
+                            break
                 ip_results[vp][ip]['co2_moer'] = ci
+
             except Exception as e:
                 ip_results[vp][ip]['co2_moer'] = None
+                print(f"Error fetching carbon intensity for IP {ip}: {e}")
 
     print("scheduling traceroute Measurements to resolved IPs...")
     # traceroute to each resolved IP
@@ -161,13 +186,13 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", se
     
     
     # print results
-    print("All candidates latencies and hop counts:")
-    for vp, l in ip_results.items():
-        print(f"From VP: {vp.name}")
-        for ip, metrics in l.items():
-            rtt_ms = metrics.get('avg_rtt_ms')
-            hop_count = metrics.get('hop_count')
-            print(f"\t{ip:20} RTT: {rtt_ms} ms, Hops: {hop_count}")
+    # print("All candidates latencies and hop counts:")
+    # for vp, l in ip_results.items():
+    #     print(f"From VP: {vp.name}")
+    #     for ip, metrics in l.items():
+    #         rtt_ms = metrics.get('avg_rtt_ms')
+    #         hop_count = metrics.get('hop_count')
+    #         print(f"\t{ip:20} RTT: {rtt_ms} ms, Hops: {hop_count}")
 
     # Export results to CSV
     export_results_to_csv(ip_results, filename=output_file.replace('.warts', '.csv'))
