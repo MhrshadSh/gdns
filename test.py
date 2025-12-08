@@ -17,7 +17,7 @@ EM_TOKEN = "ptTcw6cZ9zS07WgBYgXP"
 IPINFO_TOKEN = '6259fe15f8d92f'
 handler = ipinfo.getHandler(IPINFO_TOKEN)
 domain = "www.youtube.com"
-resolver = "8.8.8.8"
+resolvers = ["local", "1.1.1.1", "9.9.9.9", "45.90.28.207"]
 
 
 login_url = 'https://api.watttime.org/login'
@@ -102,6 +102,7 @@ def export_results_to_csv(ip_results, filename="results.csv"):
                 'vp': vp_name,
                 'dest': str(ip),
                 'version': 'IPv6' if ip.is_ipv6() else 'IPv4',
+                'resolver': metrics.get('resolver', None),
                 'avg_rtt_ms': metrics.get('avg_rtt_ms'),
                 'min_rtt_ms': metrics.get('min_rtt_ms'),
                 'stddev_rtt_ms': metrics.get('stddev_rtt_ms'),
@@ -112,7 +113,7 @@ def export_results_to_csv(ip_results, filename="results.csv"):
     
     if rows:
         with open(filename, 'w', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=['vp', 'dest', 'version', 'avg_rtt_ms', 'min_rtt_ms', 'stddev_rtt_ms', 'hop_count', 'co2_moer', 'co2_aoer'])
+            writer = csv.DictWriter(f, fieldnames=['vp', 'dest', 'version', 'resolver', 'avg_rtt_ms', 'min_rtt_ms', 'stddev_rtt_ms', 'hop_count', 'co2_moer', 'co2_aoer'])
             writer.writeheader()
             writer.writerows(rows)
         print(f"Results saved to {filename}")
@@ -120,89 +121,103 @@ def export_results_to_csv(ip_results, filename="results.csv"):
         print("No results to export")
 
 
-def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", server=None):
+def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", resolvers: list=["local"]):
     outfile = ScamperFile(filename=output_file, mode='w')
     ctrl = ScamperCtrl(mux=mux_path, outfile=outfile)
     # Select only DNS-capable vantage points
     vps = [vp for vp in ctrl.vps() if 'primitive:dns' in vp.tags]
     vp_lookup = {vp.name: vp for vp in vps} 
     print(f"Total DNS-capable VPs: {len(vps)}")
-    # vps = vps[:2]  # Limit to first n VPs for testing
+    vps = vps[:2]  # Limit to first n VPs for testing
     ctrl.add_vps(vps)
+    ip_results = defaultdict(lambda: defaultdict(dict))  # vp -> ip -> metrics dict
 
-    # 1. DNS A records
-    print(f"Resolving {target} A/AAAA records...")
-    for i in ctrl.instances():
-        ctrl.do_dns(target, qtype='A', inst=i, server=server)
-        if 'network:ipv6' in vp_lookup[i.name].tags:
-            ctrl.do_dns(target, qtype='AAAA', inst=i, server=server)
-    
-    # Collect DNS results
-    print("Collecting DNS A results...")
-    dns_results = defaultdict(list)
-    for o in ctrl.responses(timeout=timedelta(seconds=DNS_TIMEOUT)):
-        dns_results[o.inst].extend(o.ans_addrs())
-    
-
-    print("scheduling ping Measurements to resolved IPs...")
-    for vp, addrs in dns_results.items():
-        for ip in addrs:
-            ctrl.do_ping(ip, inst=vp)
-
-    # Collect ping results
-    print("Collecting ping results...")
-    ip_results = defaultdict(lambda: defaultdict(dict))
-    for o in ctrl.responses(timeout=timedelta(seconds=PING_TIMEOUT)):
-        ip_results[o.inst][o.dst]['avg_rtt_ms'] = (o.avg_rtt.total_seconds()*1000 if o.avg_rtt else None)
-        ip_results[o.inst][o.dst]['min_rtt_ms'] = (o.min_rtt.total_seconds()*1000 if o.min_rtt else None)
-        ip_results[o.inst][o.dst]['stddev_rtt_ms'] = (o.stddev_rtt.total_seconds()*1000 if o.stddev_rtt else None)
-
-    print("scheduling traceroute Measurements to resolved IPs...")
-    # traceroute to each resolved IP
-    for vp, addrs in dns_results.items():
-        for ip in addrs:
-            ctrl.do_trace(ip, inst=vp)
-
-    print("Collecting traceroute results...")
-    for o in ctrl.responses(timeout=timedelta(seconds=60)):
-        ip_results[o.inst][o.dst]['hop_count'] = (o.hop_count if o.hop_count else None)
-    
-    
-    print("Adding carbon intensity data to resolved IPs...")
     # To login to wattime and obtain an access token, use this code:
-    rsp = requests.get(login_url, auth=HTTPBasicAuth('mehrshad', 'Meh@06022000'))
-    WT_TOKEN = rsp.json()['token']
+    try:
+        rsp = requests.get(login_url, auth=HTTPBasicAuth('mehrshad', 'Meh@06022000'))
+        WT_TOKEN = rsp.json()['token']
+    except Exception as e:
+        print(f"Error logging into WattTime: {e}")
+        WT_TOKEN = None
 
-    # add carbon intensity data
-    for vp, ips in ip_results.items():
-        for ip in ips:
-            try:
-                details = handler.getDetails(str(ip))
-                latitude, longitude = details.latitude, details.longitude
-                
-                # fetch recent co2_moer values
-                moer_list_recent = fetch_signal(latitude, longitude, WT_TOKEN, signal_type="co2_moer", offset_hours=1)
-                # pick the most recent non-None value
-                moer = None
-                if moer_list_recent:
-                    for val in reversed(moer_list_recent):
-                        if val is not None:
-                            moer = val
-                            break
-                ip_results[vp][ip]['co2_moer'] = moer
-            except Exception as e:
-                ip_results[vp][ip]['co2_moer'] = None
-                print(f"Error fetching moer for IP {ip}: {e}")
+    for resolver in resolvers:
+        if resolver == "local":
+            resolver = None  # Use local resolver
+        # 1. DNS A records
+        print(f"Resolving {target} A/AAAA records via ({resolver or 'local resolver'})...")
+        for i in ctrl.instances():
+            ctrl.do_dns(target, qtype='A', inst=i, server=resolver)
+            if 'network:ipv6' in vp_lookup[i.name].tags:
+                ctrl.do_dns(target, qtype='AAAA', inst=i, server=resolver)
+        
+        # Collect DNS results
+        print("Collecting DNS A results...")
+        dns_results = defaultdict(list)
+        for o in ctrl.responses(timeout=timedelta(seconds=DNS_TIMEOUT)):
+            dns_results[o.inst].extend(o.ans_addrs())
+        
 
-            try:
-                # fetch co2_aoer value
-                aoer = fetch_signal(latitude, longitude, EM_TOKEN, signal_type="co2_aoer")
-                ip_results[vp][ip]['co2_aoer'] = aoer
-            except Exception as e:
-                ip_results[vp][ip]['co2_aoer'] = None
-                print(f"Error fetching aoer for IP {ip}: {e}")
+        print("scheduling ping Measurements to resolved IPs...")
+        for vp, addrs in dns_results.items():
+            for ip in addrs:
+                ctrl.do_ping(ip, inst=vp)
+
+        # Collect ping results
+        print("Collecting ping results...")
+        
+        for o in ctrl.responses(timeout=timedelta(seconds=PING_TIMEOUT)):
+            ip_results[o.inst][o.dst]['avg_rtt_ms'] = (o.avg_rtt.total_seconds()*1000 if o.avg_rtt else None)
+            ip_results[o.inst][o.dst]['min_rtt_ms'] = (o.min_rtt.total_seconds()*1000 if o.min_rtt else None)
+            ip_results[o.inst][o.dst]['stddev_rtt_ms'] = (o.stddev_rtt.total_seconds()*1000 if o.stddev_rtt else None)
+            ip_results[o.inst][o.dst]['resolver'] = resolver or 'local'
+
+        print("scheduling traceroute Measurements to resolved IPs...")
+        # traceroute to each resolved IP
+        for vp, addrs in dns_results.items():
+            for ip in addrs:
+                ctrl.do_trace(ip, inst=vp)
+
+        print("Collecting traceroute results...")
+        for o in ctrl.responses(timeout=timedelta(seconds=TRACEROUTE_TIMEOUT)):
+            ip_results[o.inst][o.dst]['hop_count'] = (o.hop_count if o.hop_count else None)
+
+        # finalize current resolver round
+        
+        
+        
+        print("Adding carbon intensity data to resolved IPs...")
+        # add carbon intensity data
+        for vp, ips in ip_results.items():
+            for ip in ips:
+                try:
+                    details = handler.getDetails(str(ip))
+                    latitude, longitude = details.latitude, details.longitude
+                    
+                    # fetch recent co2_moer values
+                    moer_list_recent = fetch_signal(latitude, longitude, WT_TOKEN, signal_type="co2_moer", offset_hours=1)
+                    # pick the most recent non-None value
+                    moer = None
+                    if moer_list_recent:
+                        for val in reversed(moer_list_recent):
+                            if val is not None:
+                                moer = val
+                                break
+                    ip_results[vp][ip]['co2_moer'] = moer
+                except Exception as e:
+                    ip_results[vp][ip]['co2_moer'] = None
+                    print(f"Error fetching moer for IP {ip}: {e}")
+
+                try:
+                    # fetch co2_aoer value
+                    aoer = fetch_signal(latitude, longitude, EM_TOKEN, signal_type="co2_aoer")
+                    ip_results[vp][ip]['co2_aoer'] = aoer
+                except Exception as e:
+                    ip_results[vp][ip]['co2_aoer'] = None
+                    print(f"Error fetching aoer for IP {ip}: {e}")
 
     
+
+        
     # print results
     # print("All candidates latencies and hop counts:")
     # for vp, l in ip_results.items():
@@ -218,10 +233,11 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", se
     # Clean up
     outfile.close()
     ctrl.done()
+    
 
 if __name__ == "__main__":
     # if len(sys.argv) != 3:
     #     print("Usage: python script.py <mux_socket_path> <target_host>")
     #     sys.exit(1)
     # measure_vp(sys.argv[1], target=sys.argv[2])
-    measure_vp("/run/ark/mux", target=domain)
+    measure_vp("/run/ark/mux", target=domain, resolvers=resolvers)
