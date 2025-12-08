@@ -9,12 +9,14 @@ import ipinfo
 import requests
 from requests.auth import HTTPBasicAuth
 
-access_token = '6259fe15f8d92f'
-handler = ipinfo.getHandler(access_token)
+
 DNS_TIMEOUT = 10  # seconds
 PING_TIMEOUT = 10  # seconds
 TRACEROUTE_TIMEOUT = 300  # seconds
-domain = "tiktok.com"
+EM_TOKEN = "ptTcw6cZ9zS07WgBYgXP"
+IPINFO_TOKEN = '6259fe15f8d92f'
+handler = ipinfo.getHandler(IPINFO_TOKEN)
+domain = "www.youtube.com"
 resolver = "8.8.8.8"
 
 
@@ -24,7 +26,7 @@ region_url = "https://api.watttime.org/v3/region-from-loc"
 forecast_url = "https://api.watttime.org/v3/forecast"
 df_historical_url = "https://api.watttime.org/v3/historical"
 current_url = "https://api.watttime.org/v3/signal-index"
-
+em_latest_url = "https://api.electricitymaps.com/v3/carbon-intensity/latest"
 
 @dataclass
 class MeasurementRecord:
@@ -51,30 +53,43 @@ def get_wt_region(latitude, longitude, token, signal_type="co2_moer"):
     return region
 
 
-def fetch_current_signal(latitude, longitude, token, signal_type="co2_moer", offset_hours=1):
+def fetch_signal(latitude, longitude, token, signal_type="co2_moer", offset_hours=1):
     """
     Fetch the most recent historical signal data for a given location and time offset.
     Returns a list of signal values for the specified offset hours.
     """
 
-    region = get_wt_region(latitude, longitude, token, signal_type=signal_type)
-    now = datetime.now(timezone.utc).replace(microsecond=0)
-    start_time = (now - timedelta(hours=offset_hours)).isoformat()
-    end_time = now.isoformat()
+    if signal_type=="co2_moer":
+        region = get_wt_region(latitude, longitude, token, signal_type=signal_type)
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        start_time = (now - timedelta(hours=offset_hours)).isoformat()
+        end_time = now.isoformat()
 
-    headers = {"Authorization": f"Bearer {token}"}
-    params = {
-        "region": region,
-        "start": start_time,
-        "end": end_time,
-        "signal_type": signal_type,
-    }
-    response = requests.get(df_historical_url, headers=headers, params=params)
-    response.raise_for_status()
-    data = response.json().get('data', [])
-    # Return the list of 'value' entries when present, otherwise return None
-    values = [item['value'] if isinstance(item, dict) and 'value' in item else None for item in data]
-    return values
+        headers = {"Authorization": f"Bearer {token}"}
+        params = {
+            "region": region,
+            "start": start_time,
+            "end": end_time,
+            "signal_type": signal_type,
+        }
+        response = requests.get(df_historical_url, headers=headers, params=params)
+        response.raise_for_status()
+        data = response.json().get('data', [])
+        # Return the list of 'value' entries when present, otherwise return None
+        values = [item['value'] if isinstance(item, dict) and 'value' in item else None for item in data]
+        return values
+    
+    elif signal_type=="co2_aoer":
+        url = f"{em_latest_url}?lat={latitude}&lon={longitude}&emissionFactorType=direct"
+        response = requests.get(
+            url,
+            headers={
+                "auth-token": EM_TOKEN
+            }
+        )
+        return response.json()["carbonIntensity"]
+        
+
 
 
 def export_results_to_csv(ip_results, filename="results.csv"):
@@ -91,12 +106,13 @@ def export_results_to_csv(ip_results, filename="results.csv"):
                 'min_rtt_ms': metrics.get('min_rtt_ms'),
                 'stddev_rtt_ms': metrics.get('stddev_rtt_ms'),
                 'hop_count': metrics.get('hop_count', None),
-                'co2_moer': metrics.get('co2_moer', None)
+                'co2_moer': metrics.get('co2_moer', None),
+                'co2_aoer': metrics.get('co2_aoer', None),
             })
     
     if rows:
         with open(filename, 'w', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=['vp', 'dest', 'version', 'avg_rtt_ms', 'min_rtt_ms', 'stddev_rtt_ms', 'hop_count', 'co2_moer'])
+            writer = csv.DictWriter(f, fieldnames=['vp', 'dest', 'version', 'avg_rtt_ms', 'min_rtt_ms', 'stddev_rtt_ms', 'hop_count', 'co2_moer', 'co2_aoer'])
             writer.writeheader()
             writer.writerows(rows)
         print(f"Results saved to {filename}")
@@ -151,7 +167,7 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", se
     print("Adding carbon intensity data to resolved IPs...")
     # To login to wattime and obtain an access token, use this code:
     rsp = requests.get(login_url, auth=HTTPBasicAuth('mehrshad', 'Meh@06022000'))
-    TOKEN = rsp.json()['token']
+    WT_TOKEN = rsp.json()['token']
 
     # add carbon intensity data
     for vp, ips in ip_results.items():
@@ -159,20 +175,28 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", se
             try:
                 details = handler.getDetails(str(ip))
                 latitude, longitude = details.latitude, details.longitude
-                ci_list_recent = fetch_current_signal(latitude, longitude, TOKEN, signal_type="co2_moer", offset_hours=1)
                 
+                # fetch recent co2_moer values
+                moer_list_recent = fetch_signal(latitude, longitude, WT_TOKEN, signal_type="co2_moer", offset_hours=1)
                 # pick the most recent non-None value
-                ci = None
-                if ci_list_recent:
-                    for val in reversed(ci_list_recent):
+                moer = None
+                if moer_list_recent:
+                    for val in reversed(moer_list_recent):
                         if val is not None:
-                            ci = val
+                            moer = val
                             break
-                ip_results[vp][ip]['co2_moer'] = ci
-
+                ip_results[vp][ip]['co2_moer'] = moer
             except Exception as e:
                 ip_results[vp][ip]['co2_moer'] = None
-                print(f"Error fetching carbon intensity for IP {ip}: {e}")
+                print(f"Error fetching moer for IP {ip}: {e}")
+
+            try:
+                # fetch co2_aoer value
+                aoer = fetch_signal(latitude, longitude, EM_TOKEN, signal_type="co2_aoer")
+                ip_results[vp][ip]['co2_aoer'] = aoer
+            except Exception as e:
+                ip_results[vp][ip]['co2_aoer'] = None
+                print(f"Error fetching aoer for IP {ip}: {e}")
 
     print("scheduling traceroute Measurements to resolved IPs...")
     # traceroute to each resolved IP
