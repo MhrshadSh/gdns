@@ -12,7 +12,7 @@ from requests.auth import HTTPBasicAuth
 
 DNS_TIMEOUT = 10  # seconds
 PING_TIMEOUT = 10  # seconds
-TRACEROUTE_TIMEOUT = 300  # seconds
+TRACEROUTE_TIMEOUT = 120  # seconds
 EM_TOKEN = "ptTcw6cZ9zS07WgBYgXP"
 IPINFO_TOKEN = '6259fe15f8d92f'
 handler = ipinfo.getHandler(IPINFO_TOKEN)
@@ -127,13 +127,15 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", se
     vps = [vp for vp in ctrl.vps() if 'primitive:dns' in vp.tags]
     vp_lookup = {vp.name: vp for vp in vps} 
     print(f"Total DNS-capable VPs: {len(vps)}")
-    vps = vps[:2]  # Limit to first n VPs for testing
+    # vps = vps[:2]  # Limit to first n VPs for testing
     ctrl.add_vps(vps)
 
     # 1. DNS A records
-    print(f"Resolving {target} A records...")
+    print(f"Resolving {target} A/AAAA records...")
     for i in ctrl.instances():
         ctrl.do_dns(target, qtype='A', inst=i, server=server)
+        if 'network:ipv6' in vp_lookup[i.name].tags:
+            ctrl.do_dns(target, qtype='AAAA', inst=i, server=server)
     
     # Collect DNS results
     print("Collecting DNS A results...")
@@ -141,15 +143,6 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", se
     for o in ctrl.responses(timeout=timedelta(seconds=DNS_TIMEOUT)):
         dns_results[o.inst].extend(o.ans_addrs())
     
-    print(f"Resolving {target} AAAA records...") ####### should be merged with above --------------- v4 and v6 together
-    for i in ctrl.instances():
-        if 'network:ipv6' in vp_lookup[i.name].tags:
-            ctrl.do_dns(target, qtype='AAAA', inst=i, server=server)
-    
-    # Collect DNS AAAA results
-    print("Collecting DNS AAAA results...")
-    for o in ctrl.responses(timeout=timedelta(seconds=DNS_TIMEOUT)):
-        dns_results[o.inst].extend(o.ans_addrs())
 
     print("scheduling ping Measurements to resolved IPs...")
     for vp, addrs in dns_results.items():
@@ -163,6 +156,17 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", se
         ip_results[o.inst][o.dst]['avg_rtt_ms'] = (o.avg_rtt.total_seconds()*1000 if o.avg_rtt else None)
         ip_results[o.inst][o.dst]['min_rtt_ms'] = (o.min_rtt.total_seconds()*1000 if o.min_rtt else None)
         ip_results[o.inst][o.dst]['stddev_rtt_ms'] = (o.stddev_rtt.total_seconds()*1000 if o.stddev_rtt else None)
+
+    print("scheduling traceroute Measurements to resolved IPs...")
+    # traceroute to each resolved IP
+    for vp, addrs in dns_results.items():
+        for ip in addrs:
+            ctrl.do_trace(ip, inst=vp)
+
+    print("Collecting traceroute results...")
+    for o in ctrl.responses(timeout=timedelta(seconds=60)):
+        ip_results[o.inst][o.dst]['hop_count'] = (o.hop_count if o.hop_count else None)
+    
     
     print("Adding carbon intensity data to resolved IPs...")
     # To login to wattime and obtain an access token, use this code:
@@ -198,16 +202,6 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", se
                 ip_results[vp][ip]['co2_aoer'] = None
                 print(f"Error fetching aoer for IP {ip}: {e}")
 
-    print("scheduling traceroute Measurements to resolved IPs...")
-    # traceroute to each resolved IP
-    for vp, addrs in dns_results.items():
-        for ip in addrs:
-            ctrl.do_trace(ip, inst=vp)
-
-    print("Collecting traceroute results...")
-    for o in ctrl.responses(timeout=timedelta(seconds=60)):
-        ip_results[o.inst][o.dst]['hop_count'] = (o.hop_count if o.hop_count else None)
-    
     
     # print results
     # print("All candidates latencies and hop counts:")
