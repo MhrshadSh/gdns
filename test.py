@@ -3,7 +3,7 @@ import csv
 from datetime import timedelta, timezone, datetime
 from typing import Optional
 from dataclasses import dataclass
-from scamper import ScamperCtrl, ScamperFile
+from scamper import ScamperCtrl, ScamperFile, ScamperTrace, ScamperHost
 from collections import defaultdict
 import ipinfo
 import requests
@@ -12,7 +12,7 @@ from requests.auth import HTTPBasicAuth
 
 DNS_TIMEOUT = 10  # seconds
 PING_TIMEOUT = 10  # seconds
-TRACEROUTE_TIMEOUT = 120  # seconds
+TRACEROUTE_TIMEOUT = 60  # seconds
 EM_TOKEN = "ptTcw6cZ9zS07WgBYgXP"
 IPINFO_TOKEN = '6259fe15f8d92f'
 handler = ipinfo.getHandler(IPINFO_TOKEN)
@@ -128,8 +128,10 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", re
     vps = [vp for vp in ctrl.vps() if 'primitive:dns' in vp.tags]
     vp_lookup = {vp.name: vp for vp in vps} 
     print(f"Total DNS-capable VPs: {len(vps)}")
-    vps = vps[:2]  # Limit to first n VPs for testing
+    # vps = vps[:2]  # Limit to first n VPs for testing
     ctrl.add_vps(vps)
+    dns_results = defaultdict(set)  # vp -> set of resolved IPs
+    resolver_results = defaultdict(lambda: defaultdict(set))  # vp -> resolver -> set of resolved IPs
     ip_results = defaultdict(lambda: defaultdict(dict))  # vp -> ip -> metrics dict
 
     # To login to wattime and obtain an access token, use this code:
@@ -151,14 +153,21 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", re
                 ctrl.do_dns(target, qtype='AAAA', inst=i, server=resolver)
         
         # Collect DNS results
-        print("Collecting DNS A results...")
-        dns_results = defaultdict(list)
+        print("Collecting DNS A/AAAA results...")
+        rrsets_to_ping = defaultdict(set)  # vp -> set of IPs, to be pinged. To avoid pinging duplicates
         for o in ctrl.responses(timeout=timedelta(seconds=DNS_TIMEOUT)):
-            dns_results[o.inst].extend(o.ans_addrs())
+            if not isinstance(o, ScamperHost):
+                continue  # skip non-DNS responses 
+            ans = set(o.ans_addrs() or [])
+            new_addrs = ans - dns_results[o.inst]
+            if new_addrs:
+                rrsets_to_ping[o.inst].update(new_addrs)
+                dns_results[o.inst].update(new_addrs)
+                resolver_results[o.inst][resolver or 'local'].update(ans)
         
 
         print("scheduling ping Measurements to resolved IPs...")
-        for vp, addrs in dns_results.items():
+        for vp, addrs in rrsets_to_ping.items():
             for ip in addrs:
                 ctrl.do_ping(ip, inst=vp)
 
@@ -177,13 +186,6 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", re
             for ip in addrs:
                 ctrl.do_trace(ip, inst=vp)
 
-        print("Collecting traceroute results...")
-        for o in ctrl.responses(timeout=timedelta(seconds=TRACEROUTE_TIMEOUT)):
-            ip_results[o.inst][o.dst]['hop_count'] = (o.hop_count if o.hop_count else None)
-
-        # finalize current resolver round
-        
-        
         
         print("Adding carbon intensity data to resolved IPs...")
         # add carbon intensity data
@@ -214,6 +216,15 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", re
                 except Exception as e:
                     ip_results[vp][ip]['co2_aoer'] = None
                     print(f"Error fetching aoer for IP {ip}: {e}")
+        
+        print("Collecting traceroute results...")
+        for o in ctrl.responses(timeout=timedelta(seconds=TRACEROUTE_TIMEOUT)):
+            if not isinstance(o, ScamperTrace):
+                continue  # skip non-traceroute responses
+            ip_results[o.inst][o.dst]['hop_count'] = (o.hop_count if o.hop_count else None)
+
+        for e in ctrl.exceptions():
+            print(f"Error during measurements: {e}")
 
     
 
