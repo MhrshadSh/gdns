@@ -3,7 +3,7 @@ import csv
 from datetime import timedelta, timezone, datetime
 from typing import Optional
 from dataclasses import dataclass
-from scamper import ScamperCtrl, ScamperFile, ScamperTrace, ScamperHost
+from scamper import ScamperCtrl, ScamperFile, ScamperTrace, ScamperHost, ScamperPing
 from collections import defaultdict
 import ipinfo
 import requests
@@ -134,15 +134,18 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", re
     resolver_results = defaultdict(lambda: defaultdict(set))  # vp -> resolver -> set of resolved IPs
     ip_results = defaultdict(lambda: defaultdict(dict))  # vp -> ip -> metrics dict
 
-    # To login to wattime and obtain an access token, use this code:
-    try:
-        rsp = requests.get(login_url, auth=HTTPBasicAuth('mehrshad', 'Meh@06022000'))
-        WT_TOKEN = rsp.json()['token']
-    except Exception as e:
-        print(f"Error logging into WattTime: {e}")
-        WT_TOKEN = None
+    
 
     for resolver in resolvers:
+
+        # login to wattime and obtain an access token ====================== Must be done less than every 30 minutes to avoid token expiration
+        try:
+            rsp = requests.get(login_url, auth=HTTPBasicAuth('mehrshad', 'Meh@06022000'))
+            WT_TOKEN = rsp.json()['token']
+        except Exception as e:
+            print(f"Error logging into WattTime: {e}")
+            WT_TOKEN = None
+
         if resolver == "local":
             resolver = None  # Use local resolver
         # 1. DNS A records
@@ -173,8 +176,9 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", re
 
         # Collect ping results
         print("Collecting ping results...")
-        
         for o in ctrl.responses(timeout=timedelta(seconds=PING_TIMEOUT)):
+            if not isinstance(o, ScamperPing):
+                continue  # skip non-ping responses
             ip_results[o.inst][o.dst]['avg_rtt_ms'] = (o.avg_rtt.total_seconds()*1000 if o.avg_rtt else None)
             ip_results[o.inst][o.dst]['min_rtt_ms'] = (o.min_rtt.total_seconds()*1000 if o.min_rtt else None)
             ip_results[o.inst][o.dst]['stddev_rtt_ms'] = (o.stddev_rtt.total_seconds()*1000 if o.stddev_rtt else None)
@@ -191,28 +195,34 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", re
         # add carbon intensity data
         for vp, ips in ip_results.items():
             for ip in ips:
+                # if ip_results[vp][ip].get('co2_moer') is not None and ip_results[vp][ip].get('co2_aoer') is not None:
+                #     continue  # already fetched
                 try:
                     details = handler.getDetails(str(ip))
                     latitude, longitude = details.latitude, details.longitude
                     
-                    # fetch recent co2_moer values
-                    moer_list_recent = fetch_signal(latitude, longitude, WT_TOKEN, signal_type="co2_moer", offset_hours=1)
-                    # pick the most recent non-None value
-                    moer = None
-                    if moer_list_recent:
-                        for val in reversed(moer_list_recent):
-                            if val is not None:
-                                moer = val
-                                break
-                    ip_results[vp][ip]['co2_moer'] = moer
+                    # fetch recent co2_moer values if not already present
+                    if ip_results[vp][ip].get('co2_moer') is None:
+                        moer_list_recent = fetch_signal(latitude, longitude, WT_TOKEN, signal_type="co2_moer", offset_hours=1)
+                        # pick the most recent non-None value
+                        moer = None
+                        if moer_list_recent:
+                            for val in reversed(moer_list_recent):
+                                if val is not None:
+                                    moer = val
+                                    break
+                        ip_results[vp][ip]['co2_moer'] = moer
+                
                 except Exception as e:
                     ip_results[vp][ip]['co2_moer'] = None
                     print(f"Error fetching moer for IP {ip}: {e}")
 
                 try:
-                    # fetch co2_aoer value
-                    aoer = fetch_signal(latitude, longitude, EM_TOKEN, signal_type="co2_aoer")
-                    ip_results[vp][ip]['co2_aoer'] = aoer
+                    # fetch co2_aoer value if not already present
+                    if ip_results[vp][ip].get('co2_aoer') is None:
+                        aoer = fetch_signal(latitude, longitude, EM_TOKEN, signal_type="co2_aoer")
+                        ip_results[vp][ip]['co2_aoer'] = aoer
+                
                 except Exception as e:
                     ip_results[vp][ip]['co2_aoer'] = None
                     print(f"Error fetching aoer for IP {ip}: {e}")
