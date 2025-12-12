@@ -28,19 +28,6 @@ df_historical_url = "https://api.watttime.org/v3/historical"
 current_url = "https://api.watttime.org/v3/signal-index"
 em_latest_url = "https://api.electricitymaps.com/v3/carbon-intensity/latest"
 
-@dataclass
-class MeasurementRecord:
-    """Structured tuple emitted to the mux + downstream consumers."""
-
-    node: str
-    domain: str
-    resolver: str
-    timestamp: str
-    dest_ip: Optional[str] = None 
-    rtt_ms: Optional[float] = None
-    hop_count: Optional[int] = None
-    carbon_intensity: Optional[float] = None
-
 
 def get_wt_region(latitude, longitude, token, signal_type="co2_moer"):
     """Get the WattTime region for a given latitude and longitude.
@@ -133,6 +120,8 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", re
     dns_results = defaultdict(set)  # vp -> set of resolved IPs
     resolver_results = defaultdict(lambda: defaultdict(set))  # vp -> resolver -> set of resolved IPs
     ip_results = defaultdict(lambda: defaultdict(dict))  # vp -> ip -> metrics dict
+    global_gip = []  # list of tuples (int, str) ordered by first element
+    continent_gip = defaultdict(list)  # continent -> list of tuples (int, str) ordered by first element
 
     
 
@@ -200,7 +189,8 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", re
                 try:
                     details = handler.getDetails(str(ip))
                     latitude, longitude = details.latitude, details.longitude
-                    
+                    ip_results[vp][ip]['country'] = details.country
+
                     # fetch recent co2_moer values if not already present
                     if ip_results[vp][ip].get('co2_moer') is None:
                         moer_list_recent = fetch_signal(latitude, longitude, WT_TOKEN, signal_type="co2_moer", offset_hours=1)
@@ -212,6 +202,7 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", re
                                     moer = val
                                     break
                         ip_results[vp][ip]['co2_moer'] = moer
+                        
                 
                 except Exception as e:
                     ip_results[vp][ip]['co2_moer'] = None
