@@ -1,5 +1,7 @@
 import sys
 import csv
+import os
+import time
 from datetime import timedelta, timezone, datetime
 from typing import Optional, Dict
 from dataclasses import dataclass
@@ -82,6 +84,7 @@ class IPMeasurement:
     dest: str
     version: str
     resolver: str
+    cycle_start_iso: Optional[str] = None
     avg_rtt_ms: Optional[float] = None
     min_rtt_ms: Optional[float] = None
     stddev_rtt_ms: Optional[float] = None
@@ -91,7 +94,7 @@ class IPMeasurement:
     co2_aoer: Optional[float] = None
 
 
-def _ensure_measurement(ip_results: Dict[str, Dict[str, IPMeasurement]], vp_name, ip, resolver) -> IPMeasurement:
+def _ensure_measurement(ip_results: Dict[str, Dict[str, IPMeasurement]], vp_name, ip, resolver, cycle_start_iso) -> IPMeasurement:
     """
     Ensure we have a measurement object for a vp/ip pair. This keeps all metrics in one place.
     """
@@ -99,15 +102,17 @@ def _ensure_measurement(ip_results: Dict[str, Dict[str, IPMeasurement]], vp_name
     measurement = ip_results[vp_name].get(dest)
     if measurement is None:
         version = 'IPv6' if getattr(ip, "is_ipv6", lambda: False)() else 'IPv4'
-        measurement = IPMeasurement(dest=dest, version=version, resolver=resolver or 'local')
+        measurement = IPMeasurement(dest=dest, version=version, resolver=resolver or 'local', cycle_start_iso=cycle_start_iso)
         ip_results[vp_name][dest] = measurement
     else:
         if not measurement.resolver:
             measurement.resolver = resolver or 'local'
+        if measurement.cycle_start_iso is None:
+            measurement.cycle_start_iso = cycle_start_iso
     return measurement
 
 
-def export_results_to_csv(ip_results, filename="results.csv"):
+def export_results_to_csv(ip_results, filename="results.csv", append: bool = False):
     """Export measurement results to CSV with column headers."""
     rows = []
     for vp_name, ips_dict in ip_results.items():
@@ -117,6 +122,7 @@ def export_results_to_csv(ip_results, filename="results.csv"):
                 'dest': measurement.dest,
                 'version': measurement.version,
                 'resolver': measurement.resolver,
+                'cycle_start_iso': measurement.cycle_start_iso,
                 'avg_rtt_ms': measurement.avg_rtt_ms,
                 'min_rtt_ms': measurement.min_rtt_ms,
                 'stddev_rtt_ms': measurement.stddev_rtt_ms,
@@ -126,23 +132,27 @@ def export_results_to_csv(ip_results, filename="results.csv"):
             })
     
     if rows:
-        with open(filename, 'w', newline='') as f:
-            writer = csv.DictWriter(f, fieldnames=['vp', 'dest', 'version', 'resolver', 'avg_rtt_ms', 'min_rtt_ms', 'stddev_rtt_ms', 'hop_count', 'co2_moer', 'co2_aoer'])
-            writer.writeheader()
+        fieldnames = ['vp', 'dest', 'version', 'resolver', 'cycle_start_iso', 'avg_rtt_ms', 'min_rtt_ms', 'stddev_rtt_ms', 'hop_count', 'co2_moer', 'co2_aoer']
+        mode = 'a' if append and os.path.exists(filename) else 'w'
+        write_header = not (append and os.path.exists(filename))
+        with open(filename, mode, newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if write_header:
+                writer.writeheader()
             writer.writerows(rows)
         print(f"Results saved to {filename}")
     else:
         print("No results to export")
 
 
-def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", resolvers: list=["local"]):
+def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", resolvers: list=["local"], cycle_start_iso: Optional[str] = None, append_csv: bool = False):
     outfile = ScamperFile(filename=output_file, mode='w')
     ctrl = ScamperCtrl(mux=mux_path, outfile=outfile)
     # Select only DNS-capable vantage points
     vps = [vp for vp in ctrl.vps() if 'primitive:dns' in vp.tags]
     vp_lookup = {vp.name: vp for vp in vps} 
     print(f"Total DNS-capable VPs: {len(vps)}")
-    # vps = vps[:2]  # Limit to first n VPs for testing
+    vps = vps[:2]  # Limit to first n VPs for testing
     ctrl.add_vps(vps)
     dns_results = defaultdict(set)  # vp -> set of resolved IPs
     resolver_results = defaultdict(lambda: defaultdict(set))  # vp -> resolver -> set of resolved IPs
@@ -196,7 +206,7 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", re
             if not isinstance(o, ScamperPing):
                 continue  # skip non-ping responses
             vp_name = o.inst.name if hasattr(o.inst, 'name') else str(o.inst)
-            measurement = _ensure_measurement(ip_results, vp_name, o.dst, resolver)
+            measurement = _ensure_measurement(ip_results, vp_name, o.dst, resolver, cycle_start_iso)
             measurement.avg_rtt_ms = (o.avg_rtt.total_seconds()*1000 if o.avg_rtt else None)
             measurement.min_rtt_ms = (o.min_rtt.total_seconds()*1000 if o.min_rtt else None)
             measurement.stddev_rtt_ms = (o.stddev_rtt.total_seconds()*1000 if o.stddev_rtt else None)
@@ -248,7 +258,7 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", re
             if not isinstance(o, ScamperTrace):
                 continue  # skip non-traceroute responses
             vp_name = o.inst.name if hasattr(o.inst, 'name') else str(o.inst)
-            measurement = _ensure_measurement(ip_results, vp_name, o.dst, resolver)
+            measurement = _ensure_measurement(ip_results, vp_name, o.dst, resolver, cycle_start_iso)
             measurement.hop_count = (o.hop_count if o.hop_count else None)
 
         for e in ctrl.exceptions():
@@ -267,16 +277,32 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", re
     #         print(f"\t{ip:20} RTT: {rtt_ms} ms, Hops: {hop_count}")
 
     # Export results to CSV
-    export_results_to_csv(ip_results, filename=output_file.replace('.warts', '.csv'))
+    export_results_to_csv(ip_results, filename=output_file.replace('.warts', '.csv'), append=append_csv)
 
     # Clean up
     outfile.close()
     ctrl.done()
     
 
+def run_cycles(mux_path, target, output_file, resolvers, interval_minutes: int, cycles: int):
+    """
+    Run measurements every interval_minutes for a fixed number of cycles.
+    Each cycle uses the planned start time as its timestamp; if a cycle runs long,
+    the next one still starts at its scheduled time (or immediately if behind).
+    """
+    first_start = datetime.now(timezone.utc).replace(microsecond=0)
+    for i in range(cycles):
+        cycle_start = first_start + timedelta(minutes=interval_minutes * i)
+        now = datetime.now(timezone.utc)
+        if now < cycle_start:
+            sleep_seconds = (cycle_start - now).total_seconds()
+            print(f"Waiting {sleep_seconds:.1f}s for next cycle start at {cycle_start.isoformat()}")
+            time.sleep(sleep_seconds)
+        planned_start_iso = cycle_start.isoformat()
+        print(f"Starting cycle {i+1}/{cycles} at {planned_start_iso}")
+        measure_vp(mux_path, target, output_file=output_file, resolvers=resolvers, cycle_start_iso=planned_start_iso, append_csv=True)
+
+
 if __name__ == "__main__":
-    # if len(sys.argv) != 3:
-    #     print("Usage: python script.py <mux_socket_path> <target_host>")
-    #     sys.exit(1)
-    # measure_vp(sys.argv[1], target=sys.argv[2])
-    measure_vp("/run/ark/mux", target=domain, resolvers=resolvers)
+    # Example: run every 10 minutes for 3 cycles
+    run_cycles("/run/ark/mux", target=domain, output_file="/home/gdns/gdns/results.warts", resolvers=resolvers, interval_minutes=10, cycles=3)
