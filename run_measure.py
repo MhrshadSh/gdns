@@ -2,6 +2,7 @@ import sys
 import csv
 import os
 import time
+import json
 from datetime import timedelta, timezone, datetime
 from typing import Optional, Dict
 from dataclasses import dataclass
@@ -12,23 +13,50 @@ import requests
 from requests.auth import HTTPBasicAuth
 
 
-DNS_TIMEOUT = 10  # seconds
-PING_TIMEOUT = 10  # seconds
-TRACEROUTE_TIMEOUT = 60  # seconds
-EM_TOKEN = "ptTcw6cZ9zS07WgBYgXP"
-IPINFO_TOKEN = '6259fe15f8d92f'
+CONFIG_PATH = "/home/gdns/gdns/config.json"
+
+# defaults used if config is absent; overridden on each cycle
+DEFAULT_CONFIG = {
+    "dns_timeout": 10,
+    "ping_timeout": 10,
+    "traceroute_timeout": 60,
+    "em_token": "ptTcw6cZ9zS07WgBYgXP",
+    "ipinfo_token": "6259fe15f8d92f",
+    "domain": "www.youtube.com",
+    "resolvers": ["local", "1.1.1.1"],
+    "login_url": "https://api.watttime.org/login",
+    "access_url": "https://api.watttime.org/v3/my-access",
+    "region_url": "https://api.watttime.org/v3/region-from-loc",
+    "forecast_url": "https://api.watttime.org/v3/forecast",
+    "df_historical_url": "https://api.watttime.org/v3/historical",
+    "current_url": "https://api.watttime.org/v3/signal-index",
+    "em_latest_url": "https://api.electricitymaps.com/v3/carbon-intensity/latest",
+    "limit_vps": 2,
+    "output_file": "/home/gdns/gdns/results.warts",
+    "interval_minutes": 10,
+    "cycles": 3,
+}
+
+# runtime globals set via config
+DNS_TIMEOUT = DEFAULT_CONFIG["dns_timeout"]
+PING_TIMEOUT = DEFAULT_CONFIG["ping_timeout"]
+TRACEROUTE_TIMEOUT = DEFAULT_CONFIG["traceroute_timeout"]
+EM_TOKEN = DEFAULT_CONFIG["em_token"]
+IPINFO_TOKEN = DEFAULT_CONFIG["ipinfo_token"]
 handler = ipinfo.getHandler(IPINFO_TOKEN)
-domain = "www.youtube.com"
-resolvers = ["local", "1.1.1.1"]
-
-
-login_url = 'https://api.watttime.org/login'
-access_url = "https://api.watttime.org/v3/my-access"
-region_url = "https://api.watttime.org/v3/region-from-loc"
-forecast_url = "https://api.watttime.org/v3/forecast"
-df_historical_url = "https://api.watttime.org/v3/historical"
-current_url = "https://api.watttime.org/v3/signal-index"
-em_latest_url = "https://api.electricitymaps.com/v3/carbon-intensity/latest"
+domain = DEFAULT_CONFIG["domain"]
+resolvers = DEFAULT_CONFIG["resolvers"]
+login_url = DEFAULT_CONFIG["login_url"]
+access_url = DEFAULT_CONFIG["access_url"]
+region_url = DEFAULT_CONFIG["region_url"]
+forecast_url = DEFAULT_CONFIG["forecast_url"]
+df_historical_url = DEFAULT_CONFIG["df_historical_url"]
+current_url = DEFAULT_CONFIG["current_url"]
+em_latest_url = DEFAULT_CONFIG["em_latest_url"]
+limit_vps = DEFAULT_CONFIG["limit_vps"]
+default_output_file = DEFAULT_CONFIG["output_file"]
+default_interval_minutes = DEFAULT_CONFIG["interval_minutes"]
+default_cycles = DEFAULT_CONFIG["cycles"]
 
 
 def get_wt_region(latitude, longitude, token, signal_type="co2_moer"):
@@ -40,6 +68,52 @@ def get_wt_region(latitude, longitude, token, signal_type="co2_moer"):
     response.raise_for_status()
     region = response.json()['region']
     return region
+
+
+def load_config(path: str = CONFIG_PATH) -> Dict:
+    """Load config from JSON and overlay onto defaults; tolerant to missing file or keys."""
+    cfg = DEFAULT_CONFIG.copy()
+    try:
+        with open(path, "r") as f:
+            user_cfg = json.load(f)
+            if isinstance(user_cfg, dict):
+                cfg.update(user_cfg)
+    except FileNotFoundError:
+        print(f"Config file not found at {path}, using defaults.")
+    except Exception as e:
+        print(f"Error reading config at {path}, using defaults. Err: {e}")
+    return cfg
+
+
+def apply_config(cfg: Dict):
+    """
+    Apply config values to module-level settings so each cycle picks up changes.
+    """
+    global DNS_TIMEOUT, PING_TIMEOUT, TRACEROUTE_TIMEOUT
+    global EM_TOKEN, IPINFO_TOKEN, handler, domain, resolvers
+    global login_url, access_url, region_url, forecast_url, df_historical_url, current_url, em_latest_url
+    global limit_vps, default_output_file, default_interval_minutes, default_cycles
+
+    DNS_TIMEOUT = cfg.get("dns_timeout", DNS_TIMEOUT)
+    PING_TIMEOUT = cfg.get("ping_timeout", PING_TIMEOUT)
+    TRACEROUTE_TIMEOUT = cfg.get("traceroute_timeout", TRACEROUTE_TIMEOUT)
+    EM_TOKEN = cfg.get("em_token", EM_TOKEN)
+    IPINFO_TOKEN = cfg.get("ipinfo_token", IPINFO_TOKEN)
+    handler = ipinfo.getHandler(IPINFO_TOKEN)
+    domain = cfg.get("domain", domain)
+    resolvers = cfg.get("resolvers", resolvers)
+
+    login_url = cfg.get("login_url", login_url)
+    access_url = cfg.get("access_url", access_url)
+    region_url = cfg.get("region_url", region_url)
+    forecast_url = cfg.get("forecast_url", forecast_url)
+    df_historical_url = cfg.get("df_historical_url", df_historical_url)
+    current_url = cfg.get("current_url", current_url)
+    em_latest_url = cfg.get("em_latest_url", em_latest_url)
+    limit_vps = cfg.get("limit_vps", limit_vps)
+    default_output_file = cfg.get("output_file", default_output_file)
+    default_interval_minutes = cfg.get("interval_minutes", default_interval_minutes)
+    default_cycles = cfg.get("cycles", default_cycles)
 
 
 def fetch_signal(latitude, longitude, token, signal_type="co2_moer", offset_hours=1):
@@ -152,7 +226,8 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", re
     vps = [vp for vp in ctrl.vps() if 'primitive:dns' in vp.tags]
     vp_lookup = {vp.name: vp for vp in vps} 
     print(f"Total DNS-capable VPs: {len(vps)}")
-    vps = vps[:2]  # Limit to first n VPs for testing
+    if limit_vps is not None:
+        vps = vps[:limit_vps]  # Limit to first n VPs for testing or per config
     ctrl.add_vps(vps)
     dns_results = defaultdict(set)  # vp -> set of resolved IPs
     resolver_results = defaultdict(lambda: defaultdict(set))  # vp -> resolver -> set of resolved IPs
@@ -313,17 +388,35 @@ def run_cycles(mux_path, target, output_file, resolvers, interval_minutes: int, 
     """
     first_start = datetime.now(timezone.utc).replace(microsecond=0)
     for i in range(cycles):
-        cycle_start = first_start + timedelta(minutes=interval_minutes * i)
+        cfg = load_config(CONFIG_PATH)
+        apply_config(cfg)
+        current_target = cfg.get("domain", target)
+        current_resolvers = cfg.get("resolvers", resolvers)
+        current_output = cfg.get("output_file", output_file)
+        current_interval_minutes = cfg.get("interval_minutes", interval_minutes)
+        current_cycles = cfg.get("cycles", cycles)
+
+        # adjust planned start based on possibly updated interval
+        cycle_start = first_start + timedelta(minutes=current_interval_minutes * i)
         now = datetime.now(timezone.utc)
         if now < cycle_start:
             sleep_seconds = (cycle_start - now).total_seconds()
             print(f"Waiting {sleep_seconds:.1f}s for next cycle start at {cycle_start.isoformat()}")
             time.sleep(sleep_seconds)
         planned_start_iso = cycle_start.isoformat()
-        print(f"Starting cycle {i+1}/{cycles} at {planned_start_iso}")
-        measure_vp(mux_path, target, output_file=output_file, resolvers=resolvers, cycle_start_iso=planned_start_iso, append_csv=True)
+        print(f"Starting cycle {i+1}/{current_cycles} at {planned_start_iso}")
+        measure_vp(mux_path, current_target, output_file=current_output, resolvers=current_resolvers, cycle_start_iso=planned_start_iso, append_csv=True)
 
 
 if __name__ == "__main__":
     # Example: run every 10 minutes for 3 cycles
-    run_cycles("/run/ark/mux", target=domain, output_file="/home/gdns/gdns/results.warts", resolvers=resolvers, interval_minutes=10, cycles=3)
+    cfg = load_config(CONFIG_PATH)
+    apply_config(cfg)
+    run_cycles(
+        "/run/ark/mux",
+        target=cfg.get("domain", domain),
+        output_file=cfg.get("output_file", default_output_file),
+        resolvers=cfg.get("resolvers", resolvers),
+        interval_minutes=cfg.get("interval_minutes", default_interval_minutes),
+        cycles=cfg.get("cycles", default_cycles),
+    )
