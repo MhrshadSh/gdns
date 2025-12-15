@@ -1,7 +1,7 @@
 import sys
 import csv
 from datetime import timedelta, timezone, datetime
-from typing import Optional
+from typing import Optional, Dict
 from dataclasses import dataclass
 from scamper import ScamperCtrl, ScamperFile, ScamperTrace, ScamperHost, ScamperPing
 from collections import defaultdict
@@ -17,7 +17,7 @@ EM_TOKEN = "ptTcw6cZ9zS07WgBYgXP"
 IPINFO_TOKEN = '6259fe15f8d92f'
 handler = ipinfo.getHandler(IPINFO_TOKEN)
 domain = "www.youtube.com"
-resolvers = ["local", "1.1.1.1", "9.9.9.9", "45.90.28.207"]
+resolvers = ["local", "1.1.1.1"]
 
 
 login_url = 'https://api.watttime.org/login'
@@ -77,25 +77,52 @@ def fetch_signal(latitude, longitude, token, signal_type="co2_moer", offset_hour
         return response.json()["carbonIntensity"]
         
 
+@dataclass
+class IPMeasurement:
+    dest: str
+    version: str
+    resolver: str
+    avg_rtt_ms: Optional[float] = None
+    min_rtt_ms: Optional[float] = None
+    stddev_rtt_ms: Optional[float] = None
+    hop_count: Optional[int] = None
+    country: Optional[str] = None
+    co2_moer: Optional[float] = None
+    co2_aoer: Optional[float] = None
+
+
+def _ensure_measurement(ip_results: Dict[str, Dict[str, IPMeasurement]], vp_name, ip, resolver) -> IPMeasurement:
+    """
+    Ensure we have a measurement object for a vp/ip pair. This keeps all metrics in one place.
+    """
+    dest = str(ip)
+    measurement = ip_results[vp_name].get(dest)
+    if measurement is None:
+        version = 'IPv6' if getattr(ip, "is_ipv6", lambda: False)() else 'IPv4'
+        measurement = IPMeasurement(dest=dest, version=version, resolver=resolver or 'local')
+        ip_results[vp_name][dest] = measurement
+    else:
+        if not measurement.resolver:
+            measurement.resolver = resolver or 'local'
+    return measurement
 
 
 def export_results_to_csv(ip_results, filename="results.csv"):
     """Export measurement results to CSV with column headers."""
     rows = []
-    for vp, ips_dict in ip_results.items():
-        vp_name = vp.name if hasattr(vp, 'name') else str(vp)
-        for ip, metrics in ips_dict.items():
+    for vp_name, ips_dict in ip_results.items():
+        for measurement in ips_dict.values():
             rows.append({
                 'vp': vp_name,
-                'dest': str(ip),
-                'version': 'IPv6' if ip.is_ipv6() else 'IPv4',
-                'resolver': metrics.get('resolver', None),
-                'avg_rtt_ms': metrics.get('avg_rtt_ms'),
-                'min_rtt_ms': metrics.get('min_rtt_ms'),
-                'stddev_rtt_ms': metrics.get('stddev_rtt_ms'),
-                'hop_count': metrics.get('hop_count', None),
-                'co2_moer': metrics.get('co2_moer', None),
-                'co2_aoer': metrics.get('co2_aoer', None),
+                'dest': measurement.dest,
+                'version': measurement.version,
+                'resolver': measurement.resolver,
+                'avg_rtt_ms': measurement.avg_rtt_ms,
+                'min_rtt_ms': measurement.min_rtt_ms,
+                'stddev_rtt_ms': measurement.stddev_rtt_ms,
+                'hop_count': measurement.hop_count,
+                'co2_moer': measurement.co2_moer,
+                'co2_aoer': measurement.co2_aoer,
             })
     
     if rows:
@@ -119,9 +146,9 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", re
     ctrl.add_vps(vps)
     dns_results = defaultdict(set)  # vp -> set of resolved IPs
     resolver_results = defaultdict(lambda: defaultdict(set))  # vp -> resolver -> set of resolved IPs
-    ip_results = defaultdict(lambda: defaultdict(dict))  # vp -> ip -> metrics dict
+    ip_results: Dict[str, Dict[str, IPMeasurement]] = defaultdict(dict)  # vp -> ip -> measurement dataclass
     global_gip = []  # list of tuples (int, str) ordered by first element
-    continent_gip = defaultdict(list)  # continent -> list of tuples (int, str) ordered by first element
+    
 
     
 
@@ -168,10 +195,12 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", re
         for o in ctrl.responses(timeout=timedelta(seconds=PING_TIMEOUT)):
             if not isinstance(o, ScamperPing):
                 continue  # skip non-ping responses
-            ip_results[o.inst][o.dst]['avg_rtt_ms'] = (o.avg_rtt.total_seconds()*1000 if o.avg_rtt else None)
-            ip_results[o.inst][o.dst]['min_rtt_ms'] = (o.min_rtt.total_seconds()*1000 if o.min_rtt else None)
-            ip_results[o.inst][o.dst]['stddev_rtt_ms'] = (o.stddev_rtt.total_seconds()*1000 if o.stddev_rtt else None)
-            ip_results[o.inst][o.dst]['resolver'] = resolver or 'local'
+            vp_name = o.inst.name if hasattr(o.inst, 'name') else str(o.inst)
+            measurement = _ensure_measurement(ip_results, vp_name, o.dst, resolver)
+            measurement.avg_rtt_ms = (o.avg_rtt.total_seconds()*1000 if o.avg_rtt else None)
+            measurement.min_rtt_ms = (o.min_rtt.total_seconds()*1000 if o.min_rtt else None)
+            measurement.stddev_rtt_ms = (o.stddev_rtt.total_seconds()*1000 if o.stddev_rtt else None)
+            measurement.resolver = resolver or 'local'
 
         print("scheduling traceroute Measurements to resolved IPs...")
         # traceroute to each resolved IP
@@ -182,47 +211,45 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", re
         
         print("Adding carbon intensity data to resolved IPs...")
         # add carbon intensity data
-        for vp, ips in ip_results.items():
-            for ip in ips:
-                # if ip_results[vp][ip].get('co2_moer') is not None and ip_results[vp][ip].get('co2_aoer') is not None:
-                #     continue  # already fetched
+        for _vp_name, ips in ip_results.items():
+            for ip_str, measurement in ips.items():
                 try:
-                    details = handler.getDetails(str(ip))
+                    details = handler.getDetails(ip_str)
                     latitude, longitude = details.latitude, details.longitude
-                    ip_results[vp][ip]['country'] = details.country
+                    measurement.country = details.country
 
                     # fetch recent co2_moer values if not already present
-                    if ip_results[vp][ip].get('co2_moer') is None:
+                    if measurement.co2_moer is None:
                         moer_list_recent = fetch_signal(latitude, longitude, WT_TOKEN, signal_type="co2_moer", offset_hours=1)
-                        # pick the most recent non-None value
                         moer = None
                         if moer_list_recent:
                             for val in reversed(moer_list_recent):
                                 if val is not None:
                                     moer = val
                                     break
-                        ip_results[vp][ip]['co2_moer'] = moer
+                        measurement.co2_moer = moer
                         
-                
                 except Exception as e:
-                    ip_results[vp][ip]['co2_moer'] = None
-                    print(f"Error fetching moer for IP {ip}: {e}")
+                    measurement.co2_moer = None
+                    print(f"Error fetching moer for IP {ip_str}: {e}")
 
                 try:
                     # fetch co2_aoer value if not already present
-                    if ip_results[vp][ip].get('co2_aoer') is None:
+                    if measurement.co2_aoer is None:
                         aoer = fetch_signal(latitude, longitude, EM_TOKEN, signal_type="co2_aoer")
-                        ip_results[vp][ip]['co2_aoer'] = aoer
+                        measurement.co2_aoer = aoer
                 
                 except Exception as e:
-                    ip_results[vp][ip]['co2_aoer'] = None
-                    print(f"Error fetching aoer for IP {ip}: {e}")
+                    measurement.co2_aoer = None
+                    print(f"Error fetching aoer for IP {ip_str}: {e}")
         
         print("Collecting traceroute results...")
         for o in ctrl.responses(timeout=timedelta(seconds=TRACEROUTE_TIMEOUT)):
             if not isinstance(o, ScamperTrace):
                 continue  # skip non-traceroute responses
-            ip_results[o.inst][o.dst]['hop_count'] = (o.hop_count if o.hop_count else None)
+            vp_name = o.inst.name if hasattr(o.inst, 'name') else str(o.inst)
+            measurement = _ensure_measurement(ip_results, vp_name, o.dst, resolver)
+            measurement.hop_count = (o.hop_count if o.hop_count else None)
 
         for e in ctrl.exceptions():
             print(f"Error during measurements: {e}")
