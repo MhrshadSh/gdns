@@ -157,6 +157,7 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", re
     dns_results = defaultdict(set)  # vp -> set of resolved IPs
     resolver_results = defaultdict(lambda: defaultdict(set))  # vp -> resolver -> set of resolved IPs
     ip_results: Dict[str, Dict[str, IPMeasurement]] = defaultdict(dict)  # vp -> ip -> measurement dataclass
+    carbon_cache: Dict[str, Dict[str, Optional[float]]] = {}  # per-cycle cache to avoid duplicate carbon lookups
     global_gip = []  # list of tuples (int, str) ordered by first element
     
 
@@ -223,13 +224,26 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", re
         # add carbon intensity data
         for _vp_name, ips in ip_results.items():
             for ip_str, measurement in ips.items():
+                # Skip duplicate lookups within the same cycle by using a simple cache keyed by IP string
+                cache_entry = carbon_cache.get(ip_str)
+                if cache_entry:
+                    measurement.country = cache_entry.get("country")
+                    measurement.co2_moer = cache_entry.get("co2_moer")
+                    measurement.co2_aoer = cache_entry.get("co2_aoer")
+                    continue
+
+                country_val = None
+                moer_val = measurement.co2_moer
+                aoer_val = measurement.co2_aoer
+
                 try:
                     details = handler.getDetails(ip_str)
                     latitude, longitude = details.latitude, details.longitude
-                    measurement.country = details.country
+                    country_val = details.country
+                    measurement.country = country_val
 
                     # fetch recent co2_moer values if not already present
-                    if measurement.co2_moer is None:
+                    if moer_val is None:
                         moer_list_recent = fetch_signal(latitude, longitude, WT_TOKEN, signal_type="co2_moer", offset_hours=1)
                         moer = None
                         if moer_list_recent:
@@ -237,21 +251,28 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", re
                                 if val is not None:
                                     moer = val
                                     break
-                        measurement.co2_moer = moer
-                        
+                        moer_val = moer
+                        measurement.co2_moer = moer_val
+
                 except Exception as e:
                     measurement.co2_moer = None
                     print(f"Error fetching moer for IP {ip_str}: {e}")
 
                 try:
                     # fetch co2_aoer value if not already present
-                    if measurement.co2_aoer is None:
-                        aoer = fetch_signal(latitude, longitude, EM_TOKEN, signal_type="co2_aoer")
-                        measurement.co2_aoer = aoer
-                
+                    if aoer_val is None:
+                        aoer_val = fetch_signal(latitude, longitude, EM_TOKEN, signal_type="co2_aoer")
+                        measurement.co2_aoer = aoer_val
+
                 except Exception as e:
                     measurement.co2_aoer = None
                     print(f"Error fetching aoer for IP {ip_str}: {e}")
+
+                carbon_cache[ip_str] = {
+                    "country": country_val,
+                    "co2_moer": moer_val,
+                    "co2_aoer": aoer_val,
+                }
         
         print("Collecting traceroute results...")
         for o in ctrl.responses(timeout=timedelta(seconds=TRACEROUTE_TIMEOUT)):
