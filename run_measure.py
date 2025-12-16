@@ -31,8 +31,8 @@ DEFAULT_CONFIG = {
     "df_historical_url": "https://api.watttime.org/v3/historical",
     "current_url": "https://api.watttime.org/v3/signal-index",
     "em_latest_url": "https://api.electricitymaps.com/v3/carbon-intensity/latest",
-    "limit_vps": 2,
-    "output_file": "/home/gdns/gdns/results.warts",
+    "limit_vps": None,
+    "output_file": "/home/gdns/gdns/results/results.warts",
     "interval_minutes": 10,
     "cycles": 3,
 }
@@ -197,6 +197,7 @@ def export_results_to_csv(ip_results, filename="results.csv", append: bool = Fal
                 'version': measurement.version,
                 'resolver': measurement.resolver,
                 'cycle_start_iso': measurement.cycle_start_iso,
+                'dest_country': measurement.country,
                 'avg_rtt_ms': measurement.avg_rtt_ms,
                 'min_rtt_ms': measurement.min_rtt_ms,
                 'stddev_rtt_ms': measurement.stddev_rtt_ms,
@@ -206,7 +207,7 @@ def export_results_to_csv(ip_results, filename="results.csv", append: bool = Fal
             })
     
     if rows:
-        fieldnames = ['vp', 'dest', 'version', 'resolver', 'cycle_start_iso', 'avg_rtt_ms', 'min_rtt_ms', 'stddev_rtt_ms', 'hop_count', 'co2_moer', 'co2_aoer']
+        fieldnames = ['vp', 'dest', 'version', 'resolver', 'cycle_start_iso', 'dest_country', 'avg_rtt_ms', 'min_rtt_ms', 'stddev_rtt_ms', 'hop_count', 'co2_moer', 'co2_aoer']
         mode = 'a' if append and os.path.exists(filename) else 'w'
         write_header = not (append and os.path.exists(filename))
         with open(filename, mode, newline='') as f:
