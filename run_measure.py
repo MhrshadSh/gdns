@@ -456,11 +456,18 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", re
         if not isinstance(o, ScamperPing):
             continue  # skip non-ping responses
         vp_name = o.inst.name if hasattr(o.inst, 'name') else str(o.inst)
+        ip_str = str(o.dst)
         measurement = _ensure_measurement(ip_results, vp_name, o.dst, resolver, cycle_start_iso)
         measurement.avg_rtt_ms = (o.avg_rtt.total_seconds()*1000 if o.avg_rtt else None)
         measurement.min_rtt_ms = (o.min_rtt.total_seconds()*1000 if o.min_rtt else None)
         measurement.stddev_rtt_ms = (o.stddev_rtt.total_seconds()*1000 if o.stddev_rtt else None)
         measurement.gip = True  # mark as green IP
+        # ensure carbon info present on green IP measurements as well
+        cache_entry = carbon_cache.get(ip_str)
+        if cache_entry:
+            measurement.country = cache_entry.get("country")
+            measurement.co2_moer = cache_entry.get("co2_moer")
+            measurement.co2_aoer = cache_entry.get("co2_aoer")
 
     # print results
     # print("All candidates latencies and hop counts:")
