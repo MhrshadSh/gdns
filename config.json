@@ -13,9 +13,9 @@
   "df_historical_url": "https://api.watttime.org/v3/historical",
   "current_url": "https://api.watttime.org/v3/signal-index",
   "em_latest_url": "https://api.electricitymaps.com/v3/carbon-intensity/latest",
-  "limit_vps": 2,
+  "limit_vps": null,
   "output_file": "/home/gdns/gdns/results/results.warts",
-  "interval_minutes": 7,
+  "interval_minutes": 10,
   "cycles": 3
 }
 

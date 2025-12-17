@@ -1,6 +1,8 @@
 *.csv
 *.warts
 *.pcap
+*.json
+
 
 # Ignore python cache files
 __pycache__/

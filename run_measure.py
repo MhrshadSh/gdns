@@ -14,6 +14,7 @@ from requests.auth import HTTPBasicAuth
 
 
 CONFIG_PATH = "/home/gdns/gdns/config.json"
+IP_GEO_CACHE_PATH = "/home/gdns/gdns/ip_geo_cache.json"
 
 # defaults used if config is absent; overridden on each cycle
 DEFAULT_CONFIG = {
@@ -35,6 +36,8 @@ DEFAULT_CONFIG = {
     "output_file": "/home/gdns/gdns/results/results.warts",
     "interval_minutes": 10,
     "cycles": 3,
+    "green_list_size": 5,
+    "carbon_basis": "moer",  # choose between "moer" or "aoer"
 }
 
 # runtime globals set via config
@@ -44,6 +47,7 @@ TRACEROUTE_TIMEOUT = DEFAULT_CONFIG["traceroute_timeout"]
 EM_TOKEN = DEFAULT_CONFIG["em_token"]
 IPINFO_TOKEN = DEFAULT_CONFIG["ipinfo_token"]
 handler = ipinfo.getHandler(IPINFO_TOKEN)
+IP_GEO_CACHE: Dict[str, Dict[str, Optional[str]]] = {}  # persistent across whole execution
 domain = DEFAULT_CONFIG["domain"]
 resolvers = DEFAULT_CONFIG["resolvers"]
 login_url = DEFAULT_CONFIG["login_url"]
@@ -57,6 +61,8 @@ limit_vps = DEFAULT_CONFIG["limit_vps"]
 default_output_file = DEFAULT_CONFIG["output_file"]
 default_interval_minutes = DEFAULT_CONFIG["interval_minutes"]
 default_cycles = DEFAULT_CONFIG["cycles"]
+green_list_size = DEFAULT_CONFIG["green_list_size"]
+carbon_basis = DEFAULT_CONFIG["carbon_basis"]
 
 
 def get_wt_region(latitude, longitude, token, signal_type="co2_moer"):
@@ -92,7 +98,7 @@ def apply_config(cfg: Dict):
     global DNS_TIMEOUT, PING_TIMEOUT, TRACEROUTE_TIMEOUT
     global EM_TOKEN, IPINFO_TOKEN, handler, domain, resolvers
     global login_url, access_url, region_url, forecast_url, df_historical_url, current_url, em_latest_url
-    global limit_vps, default_output_file, default_interval_minutes, default_cycles
+    global limit_vps, default_output_file, default_interval_minutes, default_cycles, green_list_size, carbon_basis
 
     DNS_TIMEOUT = cfg.get("dns_timeout", DNS_TIMEOUT)
     PING_TIMEOUT = cfg.get("ping_timeout", PING_TIMEOUT)
@@ -114,6 +120,35 @@ def apply_config(cfg: Dict):
     default_output_file = cfg.get("output_file", default_output_file)
     default_interval_minutes = cfg.get("interval_minutes", default_interval_minutes)
     default_cycles = cfg.get("cycles", default_cycles)
+    green_list_size = cfg.get("green_list_size", green_list_size)
+    carbon_basis = cfg.get("carbon_basis", carbon_basis)
+
+
+def load_ip_geo_cache(path: str = IP_GEO_CACHE_PATH):
+    """Load persistent IP geolocation cache from JSON, if present."""
+    global IP_GEO_CACHE
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+            if isinstance(data, dict):
+                # Only accept dict-valued entries
+                for ip, geo in data.items():
+                    if isinstance(geo, dict):
+                        IP_GEO_CACHE[ip] = geo
+    except FileNotFoundError:
+        # No cache yet, that's fine
+        pass
+    except Exception as e:
+        print(f"Error reading IP geo cache at {path}: {e}")
+
+
+def save_ip_geo_cache(path: str = IP_GEO_CACHE_PATH):
+    """Persist current IP geolocation cache to JSON for next executions."""
+    try:
+        with open(path, "w") as f:
+            json.dump(IP_GEO_CACHE, f)
+    except Exception as e:
+        print(f"Error writing IP geo cache to {path}: {e}")
 
 
 def fetch_signal(latitude, longitude, token, signal_type="co2_moer", offset_hours=1):
@@ -166,6 +201,43 @@ class IPMeasurement:
     country: Optional[str] = None
     co2_moer: Optional[float] = None
     co2_aoer: Optional[float] = None
+    gip: Optional[bool] = False  # green IP flag
+
+
+def _select_carbon_value(measurement: IPMeasurement, basis: str) -> Optional[float]:
+    """
+    Pick the carbon intensity to use for ranking based on the configured basis.
+    Falls back to the other value if the preferred basis is missing.
+    """
+    basis_lower = (basis or "moer").lower()
+    if basis_lower == "aoer":
+        return measurement.co2_aoer if measurement.co2_aoer is not None else measurement.co2_moer
+    # default to moer
+    return measurement.co2_moer if measurement.co2_moer is not None else measurement.co2_aoer
+
+
+def _update_green_list(green_list: list, ip: str, vp_name: str, resolver: str, carbon_value: float, max_size: int):
+    """
+    Maintain a fixed-size list of the greenest IPs (lowest carbon intensity).
+    If the list exceeds max_size, drop the entry with the highest carbon value.
+    """
+    if carbon_value is None:
+        return
+    entry = (carbon_value, ip, vp_name, resolver or "local")
+
+    # If IP already exists, keep the greener (lower) value
+    for idx, item in enumerate(green_list):
+        _, existing_ip, _, _ = item
+        if existing_ip == ip:
+            if carbon_value < item[0]:
+                green_list[idx] = entry
+            break
+    else:
+        green_list.append(entry)
+
+    green_list.sort(key=lambda x: x[0])
+    if len(green_list) > max_size:
+        green_list.pop()  # remove the least green (largest carbon value)
 
 
 def _ensure_measurement(ip_results: Dict[str, Dict[str, IPMeasurement]], vp_name, ip, resolver, cycle_start_iso) -> IPMeasurement:
@@ -204,10 +276,11 @@ def export_results_to_csv(ip_results, filename="results.csv", append: bool = Fal
                 'hop_count': measurement.hop_count,
                 'co2_moer': measurement.co2_moer,
                 'co2_aoer': measurement.co2_aoer,
+                'gip': measurement.gip,
             })
     
     if rows:
-        fieldnames = ['vp', 'dest', 'version', 'resolver', 'cycle_start_iso', 'dest_country', 'avg_rtt_ms', 'min_rtt_ms', 'stddev_rtt_ms', 'hop_count', 'co2_moer', 'co2_aoer']
+        fieldnames = ['vp', 'dest', 'version', 'resolver', 'cycle_start_iso', 'dest_country', 'avg_rtt_ms', 'min_rtt_ms', 'stddev_rtt_ms', 'hop_count', 'co2_moer', 'co2_aoer', 'gip']
         mode = 'a' if append and os.path.exists(filename) else 'w'
         write_header = not (append and os.path.exists(filename))
         with open(filename, mode, newline='') as f:
@@ -234,10 +307,7 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", re
     resolver_results = defaultdict(lambda: defaultdict(set))  # vp -> resolver -> set of resolved IPs
     ip_results: Dict[str, Dict[str, IPMeasurement]] = defaultdict(dict)  # vp -> ip -> measurement dataclass
     carbon_cache: Dict[str, Dict[str, Optional[float]]] = {}  # per-cycle cache to avoid duplicate carbon lookups
-    global_gip = []  # list of tuples (int, str) ordered by first element
-    
-
-    
+    green_ip_list = []  # (carbon_value, ip, vp_name, resolver)
 
     for resolver in resolvers:
 
@@ -306,49 +376,61 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", re
                     measurement.country = cache_entry.get("country")
                     measurement.co2_moer = cache_entry.get("co2_moer")
                     measurement.co2_aoer = cache_entry.get("co2_aoer")
-                    continue
+                else:
+                    country_val = None
+                    moer_val = measurement.co2_moer
+                    aoer_val = measurement.co2_aoer
 
-                country_val = None
-                moer_val = measurement.co2_moer
-                aoer_val = measurement.co2_aoer
+                    try:
+                        geo = IP_GEO_CACHE.get(ip_str)
+                        if geo is None:
+                            details = handler.getDetails(ip_str)
+                            geo = {
+                                "latitude": details.latitude,
+                                "longitude": details.longitude,
+                                "country": details.country,
+                            }
+                            IP_GEO_CACHE[ip_str] = geo
 
-                try:
-                    details = handler.getDetails(ip_str)
-                    latitude, longitude = details.latitude, details.longitude
-                    country_val = details.country
-                    measurement.country = country_val
+                        latitude = geo["latitude"]
+                        longitude = geo["longitude"]
+                        country_val = geo["country"]
+                        measurement.country = country_val
 
-                    # fetch recent co2_moer values if not already present
-                    if moer_val is None:
-                        moer_list_recent = fetch_signal(latitude, longitude, WT_TOKEN, signal_type="co2_moer", offset_hours=1)
-                        moer = None
-                        if moer_list_recent:
-                            for val in reversed(moer_list_recent):
-                                if val is not None:
-                                    moer = val
-                                    break
-                        moer_val = moer
-                        measurement.co2_moer = moer_val
+                        # fetch recent co2_moer values if not already present
+                        if moer_val is None:
+                            moer_list_recent = fetch_signal(latitude, longitude, WT_TOKEN, signal_type="co2_moer", offset_hours=1)
+                            moer = None
+                            if moer_list_recent:
+                                for val in reversed(moer_list_recent):
+                                    if val is not None:
+                                        moer = val
+                                        break
+                            moer_val = moer
+                            measurement.co2_moer = moer_val
 
-                except Exception as e:
-                    measurement.co2_moer = None
-                    print(f"Error fetching moer for IP {ip_str}: {e}")
+                    except Exception as e:
+                        measurement.co2_moer = None
+                        print(f"Error fetching moer for IP {ip_str}: {e}")
 
-                try:
-                    # fetch co2_aoer value if not already present
-                    if aoer_val is None:
-                        aoer_val = fetch_signal(latitude, longitude, EM_TOKEN, signal_type="co2_aoer")
-                        measurement.co2_aoer = aoer_val
+                    # try:
+                    #     # fetch co2_aoer value if not already present
+                    #     if aoer_val is None:
+                    #         aoer_val = fetch_signal(latitude, longitude, EM_TOKEN, signal_type="co2_aoer")
+                    #         measurement.co2_aoer = aoer_val
 
-                except Exception as e:
-                    measurement.co2_aoer = None
-                    print(f"Error fetching aoer for IP {ip_str}: {e}")
+                    # except Exception as e:
+                    #     measurement.co2_aoer = None
+                    #     print(f"Error fetching aoer for IP {ip_str}: {e}")
 
-                carbon_cache[ip_str] = {
-                    "country": country_val,
-                    "co2_moer": moer_val,
-                    "co2_aoer": aoer_val,
-                }
+                    carbon_cache[ip_str] = {
+                        "country": country_val,
+                        "co2_moer": moer_val,
+                        "co2_aoer": aoer_val,
+                    }
+
+                carbon_value = _select_carbon_value(measurement, carbon_basis)
+                _update_green_list(green_ip_list, ip_str, _vp_name, measurement.resolver or resolver or "local", carbon_value, green_list_size)
         
         print("Collecting traceroute results...")
         for o in ctrl.responses(timeout=timedelta(seconds=TRACEROUTE_TIMEOUT)):
@@ -361,9 +443,25 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", re
         for e in ctrl.exceptions():
             print(f"Error during measurements: {e}")
 
-    
 
-        
+    print("Scheduling pings to greenest IPs...")
+    for i in ctrl.instances():
+        for entry in green_ip_list:
+            _, ip, vp_name, resolver = entry
+            ctrl.do_ping(ip, inst=i)
+
+    # Collect green ping results
+    print("Collecting green ping results...")
+    for o in ctrl.responses(timeout=timedelta(seconds=PING_TIMEOUT)):
+        if not isinstance(o, ScamperPing):
+            continue  # skip non-ping responses
+        vp_name = o.inst.name if hasattr(o.inst, 'name') else str(o.inst)
+        measurement = _ensure_measurement(ip_results, vp_name, o.dst, resolver, cycle_start_iso)
+        measurement.avg_rtt_ms = (o.avg_rtt.total_seconds()*1000 if o.avg_rtt else None)
+        measurement.min_rtt_ms = (o.min_rtt.total_seconds()*1000 if o.min_rtt else None)
+        measurement.stddev_rtt_ms = (o.stddev_rtt.total_seconds()*1000 if o.stddev_rtt else None)
+        measurement.gip = True  # mark as green IP
+
     # print results
     # print("All candidates latencies and hop counts:")
     # for vp, l in ip_results.items():
@@ -375,6 +473,8 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", re
 
     # Export results to CSV
     export_results_to_csv(ip_results, filename=output_file.replace('.warts', '.csv'), append=append_csv)
+    # After each cycle, persist updated geolocation cache for next execution
+    save_ip_geo_cache(IP_GEO_CACHE_PATH)
 
     # Clean up
     outfile.close()
@@ -388,6 +488,8 @@ def run_cycles(mux_path, target, output_file, resolvers, interval_minutes: int, 
     the next one still starts at its scheduled time (or immediately if behind).
     """
     first_start = datetime.now(timezone.utc).replace(microsecond=0)
+    # Load persistent IP geolocation cache once per execution
+    load_ip_geo_cache(IP_GEO_CACHE_PATH)
     for i in range(cycles):
         cfg = load_config(CONFIG_PATH)
         apply_config(cfg)
@@ -407,6 +509,8 @@ def run_cycles(mux_path, target, output_file, resolvers, interval_minutes: int, 
         planned_start_iso = cycle_start.isoformat()
         print(f"Starting cycle {i+1}/{current_cycles} at {planned_start_iso}")
         measure_vp(mux_path, current_target, output_file=current_output, resolvers=current_resolvers, cycle_start_iso=planned_start_iso, append_csv=True)
+
+    
 
 
 if __name__ == "__main__":
