@@ -11,6 +11,8 @@ from collections import defaultdict
 import ipinfo
 import requests
 from requests.auth import HTTPBasicAuth
+from wt_region_lookup import lookup_wt_region
+
 
 
 CONFIG_PATH = "/home/gdns/gdns/config.json"
@@ -158,7 +160,7 @@ def fetch_signal(latitude, longitude, token, signal_type="co2_moer", offset_hour
     """
 
     if signal_type=="co2_moer":
-        region = get_wt_region(latitude, longitude, token, signal_type=signal_type)
+        region = lookup_wt_region(latitude, longitude)
         now = datetime.now(timezone.utc).replace(microsecond=0)
         start_time = (now - timedelta(hours=offset_hours)).isoformat()
         end_time = now.isoformat()
