@@ -153,14 +153,14 @@ def save_ip_geo_cache(path: str = IP_GEO_CACHE_PATH):
         print(f"Error writing IP geo cache to {path}: {e}")
 
 
-def fetch_signal(latitude, longitude, token, signal_type="co2_moer", offset_hours=1):
+def fetch_signal(region, token, signal_type="co2_moer", offset_hours=1):
     """
     Fetch the most recent historical signal data for a given location and time offset.
     Returns a list of signal values for the specified offset hours.
     """
 
     if signal_type=="co2_moer":
-        region = lookup_wt_region(latitude, longitude)
+        
         now = datetime.now(timezone.utc).replace(microsecond=0)
         start_time = (now - timedelta(hours=offset_hours)).isoformat()
         end_time = now.isoformat()
@@ -179,15 +179,15 @@ def fetch_signal(latitude, longitude, token, signal_type="co2_moer", offset_hour
         values = [item['value'] if isinstance(item, dict) and 'value' in item else None for item in data]
         return values
     
-    elif signal_type=="co2_aoer":
-        url = f"{em_latest_url}?lat={latitude}&lon={longitude}&emissionFactorType=direct"
-        response = requests.get(
-            url,
-            headers={
-                "auth-token": EM_TOKEN
-            }
-        )
-        return response.json()["carbonIntensity"]
+    # elif signal_type=="co2_aoer":
+    #     url = f"{em_latest_url}?lat={latitude}&lon={longitude}&emissionFactorType=direct"
+    #     response = requests.get(
+    #         url,
+    #         headers={
+    #             "auth-token": EM_TOKEN
+    #         }
+    #     )
+    #     return response.json()["carbonIntensity"]
         
 
 @dataclass
@@ -372,45 +372,51 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", re
         # add carbon intensity data
         for _vp_name, ips in ip_results.items():
             for ip_str, measurement in ips.items():
-                # Skip duplicate lookups within the same cycle by using a simple cache keyed by IP string
-                cache_entry = carbon_cache.get(ip_str)
+                # fetch GEO data
+                try:
+                    geo = IP_GEO_CACHE.get(ip_str)
+                    if geo is None:
+                        details = handler.getDetails(ip_str)
+                        geo = {
+                            "latitude": details.latitude,
+                            "longitude": details.longitude,
+                            "country": details.country,
+                        }
+                        IP_GEO_CACHE[ip_str] = geo
+
+                    latitude = geo["latitude"]
+                    longitude = geo["longitude"]
+                    country_val = geo["country"]
+                    measurement.country = country_val
+                except Exception as e:
+                        measurement.co2_moer = None
+                        print(f"Error fetching GEO data for IP {ip_str}: {e}")
+
+                # fetch watttime region
+                region = lookup_wt_region(latitude, longitude)
+                
+                # Skip duplicate lookups within the same cycle by using a simple cache keyed by region string
+                cache_entry = carbon_cache.get(region)
                 if cache_entry:
-                    measurement.country = cache_entry.get("country")
                     measurement.co2_moer = cache_entry.get("co2_moer")
                     measurement.co2_aoer = cache_entry.get("co2_aoer")
                 else:
-                    country_val = None
                     moer_val = measurement.co2_moer
                     aoer_val = measurement.co2_aoer
 
+                
+                # fetch recent co2_moer values if not already present
+                if moer_val is None:
                     try:
-                        geo = IP_GEO_CACHE.get(ip_str)
-                        if geo is None:
-                            details = handler.getDetails(ip_str)
-                            geo = {
-                                "latitude": details.latitude,
-                                "longitude": details.longitude,
-                                "country": details.country,
-                            }
-                            IP_GEO_CACHE[ip_str] = geo
-
-                        latitude = geo["latitude"]
-                        longitude = geo["longitude"]
-                        country_val = geo["country"]
-                        measurement.country = country_val
-
-                        # fetch recent co2_moer values if not already present
-                        if moer_val is None:
-                            moer_list_recent = fetch_signal(latitude, longitude, WT_TOKEN, signal_type="co2_moer", offset_hours=1)
-                            moer = None
-                            if moer_list_recent:
-                                for val in reversed(moer_list_recent):
-                                    if val is not None:
-                                        moer = val
-                                        break
-                            moer_val = moer
-                            measurement.co2_moer = moer_val
-
+                        moer_list_recent = fetch_signal(region, WT_TOKEN, signal_type="co2_moer", offset_hours=1)
+                        moer = None
+                        if moer_list_recent:
+                            for val in reversed(moer_list_recent):
+                                if val is not None:
+                                    moer = val
+                                    break
+                        moer_val = moer
+                        measurement.co2_moer = moer_val
                     except Exception as e:
                         measurement.co2_moer = None
                         print(f"Error fetching moer for IP {ip_str}: {e}")
@@ -425,8 +431,7 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", re
                     #     measurement.co2_aoer = None
                     #     print(f"Error fetching aoer for IP {ip_str}: {e}")
 
-                    carbon_cache[ip_str] = {
-                        "country": country_val,
+                    carbon_cache[region] = {
                         "co2_moer": moer_val,
                         "co2_aoer": aoer_val,
                     }
