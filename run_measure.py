@@ -514,8 +514,9 @@ def run_cycles(mux_path, target, output_file, resolvers, interval_minutes: int, 
             print(f"Waiting {sleep_seconds:.1f}s for next cycle start at {cycle_start.isoformat()}")
             time.sleep(sleep_seconds)
         planned_start_iso = cycle_start.isoformat()
-        print(f"Starting cycle {i+1}/{current_cycles} at {planned_start_iso}")
+        print(f"Starting cycle {i+1}/{current_cycles} scheduled at {planned_start_iso}| now: {datetime.now(timezone.utc).isoformat()}")
         measure_vp(mux_path, current_target, output_file=current_output, resolvers=current_resolvers, cycle_start_iso=planned_start_iso, append_csv=True)
+        print(f"Completed cycle {i+1}/{current_cycles} at {datetime.now(timezone.utc).isoformat()}")
 
     
 
