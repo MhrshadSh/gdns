@@ -16,6 +16,8 @@
   "limit_vps": null,
   "output_file": "/home/gdns/gdns/results/results.warts",
   "interval_minutes": 10,
-  "cycles": 3
+  "cycles": 3,
+  "green_list_size": 5,
+  "carbon_basis": "moer"
 }
 

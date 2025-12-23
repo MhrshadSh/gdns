@@ -470,11 +470,12 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", re
         measurement.stddev_rtt_ms = (o.stddev_rtt.total_seconds()*1000 if o.stddev_rtt else None)
         measurement.gip = True  # mark as green IP
         # ensure carbon info present on green IP measurements as well
-        cache_entry = carbon_cache.get(ip_str)
-        if cache_entry:
-            measurement.country = cache_entry.get("country")
-            measurement.co2_moer = cache_entry.get("co2_moer")
-            measurement.co2_aoer = cache_entry.get("co2_aoer")
+        for item in green_ip_list:
+            carbon, ip, vp_name, resolver = item
+            if ip == ip_str:
+                measurement.co2_moer = carbon if carbon_basis == "moer" else None
+                measurement.co2_aoer = carbon if carbon_basis == "aoer" else None
+                break
 
     # print results
     # print("All candidates latencies and hop counts:")
