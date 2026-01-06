@@ -218,26 +218,27 @@ def _select_carbon_value(measurement: IPMeasurement, basis: str) -> Optional[flo
     return measurement.co2_moer if measurement.co2_moer is not None else measurement.co2_aoer
 
 
-def _update_green_list(green_list: list, ip: str, vp_name: str, resolver: str, carbon_value: float, max_size: int):
+def _update_green_list(green_list: list[IPMeasurement], measurement: IPMeasurement, carbon_basis: str, max_size: int):
     """
     Maintain a fixed-size list of the greenest IPs (lowest carbon intensity).
     If the list exceeds max_size, drop the entry with the highest carbon value.
     """
+    carbon_value = _select_carbon_value(measurement, carbon_basis)
     if carbon_value is None:
         return
-    entry = (carbon_value, ip, vp_name, resolver or "local")
+    entry = measurement
 
     # If IP already exists, keep the greener (lower) value
     for idx, item in enumerate(green_list):
-        _, existing_ip, _, _ = item
-        if existing_ip == ip:
-            if carbon_value < item[0]:
+        existing_ip = item.dest
+        if existing_ip == measurement.dest:
+            if carbon_value < _select_carbon_value(item, carbon_basis):
                 green_list[idx] = entry
             break
     else:
         green_list.append(entry)
 
-    green_list.sort(key=lambda x: x[0])
+    green_list.sort(key=lambda x: x.co2_moer)
     if len(green_list) > max_size:
         green_list.pop()  # remove the least green (largest carbon value)
 
@@ -309,7 +310,7 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", re
     resolver_results = defaultdict(lambda: defaultdict(set))  # vp -> resolver -> set of resolved IPs
     ip_results: Dict[str, Dict[str, IPMeasurement]] = defaultdict(dict)  # vp -> ip -> measurement dataclass
     carbon_cache: Dict[str, Dict[str, Optional[float]]] = {}  # per-cycle cache to avoid duplicate carbon lookups
-    green_ip_list = []  # (carbon_value, ip, vp_name, resolver)
+    green_ip_list = []
 
     for resolver in resolvers:
 
@@ -437,7 +438,7 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", re
                     }
 
                 carbon_value = _select_carbon_value(measurement, carbon_basis)
-                _update_green_list(green_ip_list, ip_str, _vp_name, measurement.resolver or resolver or "local", carbon_value, green_list_size)
+                _update_green_list(green_ip_list, measurement, carbon_basis, green_list_size)
         
         print("Collecting traceroute results...")
         for o in ctrl.responses(timeout=timedelta(seconds=TRACEROUTE_TIMEOUT)):
@@ -454,8 +455,7 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", re
     print("Scheduling pings to greenest IPs...")
     for i in ctrl.instances():
         for entry in green_ip_list:
-            _, ip, vp_name, resolver = entry
-            ctrl.do_ping(ip, inst=i)
+            ctrl.do_ping(entry.dest, inst=i)
 
     # Collect green ping results
     print("Collecting green ping results...")
@@ -471,10 +471,9 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", re
         measurement.gip = True  # mark as green IP
         # ensure carbon info present on green IP measurements as well
         for item in green_ip_list:
-            carbon, ip, vp_name, resolver = item
-            if ip == ip_str:
-                measurement.co2_moer = carbon if carbon_basis == "moer" else None
-                measurement.co2_aoer = carbon if carbon_basis == "aoer" else None
+            if item.dest == ip_str:
+                measurement.co2_moer = item.co2_moer if carbon_basis == "moer" else None
+                measurement.co2_aoer = item.co2_aoer if carbon_basis == "aoer" else None
                 break
 
     # print results
