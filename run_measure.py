@@ -504,15 +504,16 @@ def run_cycles(mux_path, target, output_file, resolvers, interval_minutes: int, 
     first_start = datetime.now(timezone.utc).replace(microsecond=0)
     # Load persistent IP geolocation cache once per execution
     load_ip_geo_cache(IP_GEO_CACHE_PATH)
-    for i in range(cycles):
+
+    i = 0
+    while True:
         cfg = load_config(CONFIG_PATH)
         apply_config(cfg)
         current_target = cfg.get("domain", target)
         current_resolvers = cfg.get("resolvers", resolvers)
         current_output = cfg.get("output_file", output_file)
         current_interval_minutes = cfg.get("interval_minutes", interval_minutes)
-        current_cycles = cfg.get("cycles", cycles)
-
+        
         # adjust planned start based on possibly updated interval
         cycle_start = first_start + timedelta(minutes=current_interval_minutes * i)
         now = datetime.now(timezone.utc)
@@ -521,9 +522,10 @@ def run_cycles(mux_path, target, output_file, resolvers, interval_minutes: int, 
             print(f"Waiting {sleep_seconds:.1f}s for next cycle start at {cycle_start.isoformat()}")
             time.sleep(sleep_seconds)
         planned_start_iso = cycle_start.isoformat()
-        print(f"Starting cycle {i+1}/{current_cycles} scheduled at {planned_start_iso}| now: {datetime.now(timezone.utc).isoformat()}")
+        print(f"Starting cycle {i+1} scheduled at {planned_start_iso}| now: {datetime.now(timezone.utc).isoformat()}")
         measure_vp(mux_path, current_target, output_file=current_output, resolvers=current_resolvers, cycle_start_iso=planned_start_iso, append_csv=True)
-        print(f"Completed cycle {i+1}/{current_cycles} at {datetime.now(timezone.utc).isoformat()}")
+        print(f"Completed cycle {i+1} at {datetime.now(timezone.utc).isoformat()}")
+        i += 1
 
     
 

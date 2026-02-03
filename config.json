@@ -1,11 +1,11 @@
 {
   "dns_timeout": 10,
   "ping_timeout": 10,
-  "traceroute_timeout": 60,
+  "traceroute_timeout": 120,
   "em_token": "ptTcw6cZ9zS07WgBYgXP",
   "ipinfo_token": "6259fe15f8d92f",
   "domain": "www.youtube.com",
-  "resolvers": ["local"],
+  "resolvers": ["local", "1.1.1.1", "9.9.9.9", "45.90.28.23"],
   "login_url": "https://api.watttime.org/login",
   "access_url": "https://api.watttime.org/v3/my-access",
   "region_url": "https://api.watttime.org/v3/region-from-loc",
@@ -13,10 +13,10 @@
   "df_historical_url": "https://api.watttime.org/v3/historical",
   "current_url": "https://api.watttime.org/v3/signal-index",
   "em_latest_url": "https://api.electricitymaps.com/v3/carbon-intensity/latest",
-  "limit_vps": 2,
+  "limit_vps": null,
   "output_file": "/home/gdns/gdns/results/results.warts",
-  "interval_minutes": 10,
-  "cycles": 3,
+  "interval_minutes": 30,
+  "cycles": 48,
   "green_list_size": 5,
   "carbon_basis": "moer"
 }
