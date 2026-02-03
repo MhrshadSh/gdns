@@ -25,7 +25,7 @@ DEFAULT_CONFIG = {
     "traceroute_timeout": 60,
     "em_token": "ptTcw6cZ9zS07WgBYgXP",
     "ipinfo_token": "6259fe15f8d92f",
-    "domain": "www.youtube.com",
+    "domain": ["www.youtube.com"],
     "resolvers": ["local", "1.1.1.1"],
     "login_url": "https://api.watttime.org/login",
     "access_url": "https://api.watttime.org/v3/my-access",
@@ -37,7 +37,6 @@ DEFAULT_CONFIG = {
     "limit_vps": None,
     "output_file": "/home/gdns/gdns/results/results.warts",
     "interval_minutes": 10,
-    "cycles": 3,
     "green_list_size": 5,
     "carbon_basis": "moer",  # choose between "moer" or "aoer"
 }
@@ -62,7 +61,6 @@ em_latest_url = DEFAULT_CONFIG["em_latest_url"]
 limit_vps = DEFAULT_CONFIG["limit_vps"]
 default_output_file = DEFAULT_CONFIG["output_file"]
 default_interval_minutes = DEFAULT_CONFIG["interval_minutes"]
-default_cycles = DEFAULT_CONFIG["cycles"]
 green_list_size = DEFAULT_CONFIG["green_list_size"]
 carbon_basis = DEFAULT_CONFIG["carbon_basis"]
 
@@ -121,7 +119,6 @@ def apply_config(cfg: Dict):
     limit_vps = cfg.get("limit_vps", limit_vps)
     default_output_file = cfg.get("output_file", default_output_file)
     default_interval_minutes = cfg.get("interval_minutes", default_interval_minutes)
-    default_cycles = cfg.get("cycles", default_cycles)
     green_list_size = cfg.get("green_list_size", green_list_size)
     carbon_basis = cfg.get("carbon_basis", carbon_basis)
 
@@ -296,7 +293,15 @@ def export_results_to_csv(ip_results, filename="results.csv", append: bool = Fal
         print("No results to export")
 
 
-def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", resolvers: list=["local"], cycle_start_iso: Optional[str] = None, append_csv: bool = False):
+def measure_vp(mux_path: str, 
+               targets: list, 
+               output_file="/home/gdns/gdns/results.warts", 
+               resolvers: list=["local"], 
+               cycle_start_iso: Optional[str] = None, 
+               append_csv: bool = True
+               ):
+    
+
     outfile = ScamperFile(filename=output_file, mode='w')
     ctrl = ScamperCtrl(mux=mux_path, outfile=outfile)
     # Select only DNS-capable vantage points
@@ -312,144 +317,144 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", re
     carbon_cache: Dict[str, Dict[str, Optional[float]]] = {}  # per-cycle cache to avoid duplicate carbon lookups
     green_ip_list = []
 
-    for resolver in resolvers:
+    for target in targets:
+        for resolver in resolvers:
+            # login to wattime and obtain an access token ====================== Must be done less than every 30 minutes to avoid token expiration
+            try:
+                rsp = requests.get(login_url, auth=HTTPBasicAuth('mehrshad', 'Meh@06022000'))
+                WT_TOKEN = rsp.json()['token']
+            except Exception as e:
+                print(f"Error logging into WattTime: {e}")
+                WT_TOKEN = None
 
-        # login to wattime and obtain an access token ====================== Must be done less than every 30 minutes to avoid token expiration
-        try:
-            rsp = requests.get(login_url, auth=HTTPBasicAuth('mehrshad', 'Meh@06022000'))
-            WT_TOKEN = rsp.json()['token']
-        except Exception as e:
-            print(f"Error logging into WattTime: {e}")
-            WT_TOKEN = None
+            if resolver == "local":
+                resolver = None  # Use local resolver
+            # 1. DNS A records
+            print(f"Resolving {target} A/AAAA records via ({resolver or 'local resolver'})...")
+            for i in ctrl.instances():
+                ctrl.do_dns(target, qtype='A', inst=i, server=resolver)
+                if 'network:ipv6' in vp_lookup[i.name].tags:
+                    ctrl.do_dns(target, qtype='AAAA', inst=i, server=resolver)
+            
+            # Collect DNS results
+            print("Collecting DNS A/AAAA results...")
+            rrsets_to_ping = defaultdict(set)  # vp -> set of IPs, to be pinged. To avoid pinging duplicates
+            for o in ctrl.responses(timeout=timedelta(seconds=DNS_TIMEOUT)):
+                if not isinstance(o, ScamperHost):
+                    continue  # skip non-DNS responses 
+                ans = set(o.ans_addrs() or [])
+                new_addrs = ans - dns_results[o.inst]
+                if new_addrs:
+                    rrsets_to_ping[o.inst].update(new_addrs)
+                    dns_results[o.inst].update(new_addrs)
+                    resolver_results[o.inst][resolver or 'local'].update(ans)
+            
 
-        if resolver == "local":
-            resolver = None  # Use local resolver
-        # 1. DNS A records
-        print(f"Resolving {target} A/AAAA records via ({resolver or 'local resolver'})...")
-        for i in ctrl.instances():
-            ctrl.do_dns(target, qtype='A', inst=i, server=resolver)
-            if 'network:ipv6' in vp_lookup[i.name].tags:
-                ctrl.do_dns(target, qtype='AAAA', inst=i, server=resolver)
-        
-        # Collect DNS results
-        print("Collecting DNS A/AAAA results...")
-        rrsets_to_ping = defaultdict(set)  # vp -> set of IPs, to be pinged. To avoid pinging duplicates
-        for o in ctrl.responses(timeout=timedelta(seconds=DNS_TIMEOUT)):
-            if not isinstance(o, ScamperHost):
-                continue  # skip non-DNS responses 
-            ans = set(o.ans_addrs() or [])
-            new_addrs = ans - dns_results[o.inst]
-            if new_addrs:
-                rrsets_to_ping[o.inst].update(new_addrs)
-                dns_results[o.inst].update(new_addrs)
-                resolver_results[o.inst][resolver or 'local'].update(ans)
-        
+            print("scheduling ping Measurements to resolved IPs...")
+            for vp, addrs in rrsets_to_ping.items():
+                for ip in addrs:
+                    ctrl.do_ping(ip, inst=vp)
 
-        print("scheduling ping Measurements to resolved IPs...")
-        for vp, addrs in rrsets_to_ping.items():
-            for ip in addrs:
-                ctrl.do_ping(ip, inst=vp)
+            # Collect ping results
+            print("Collecting ping results...")
+            for o in ctrl.responses(timeout=timedelta(seconds=PING_TIMEOUT)):
+                if not isinstance(o, ScamperPing):
+                    continue  # skip non-ping responses
+                vp_name = o.inst.name if hasattr(o.inst, 'name') else str(o.inst)
+                measurement = _ensure_measurement(ip_results, vp_name, o.dst, resolver, cycle_start_iso)
+                measurement.avg_rtt_ms = (o.avg_rtt.total_seconds()*1000 if o.avg_rtt else None)
+                measurement.min_rtt_ms = (o.min_rtt.total_seconds()*1000 if o.min_rtt else None)
+                measurement.stddev_rtt_ms = (o.stddev_rtt.total_seconds()*1000 if o.stddev_rtt else None)
+                measurement.resolver = resolver or 'local'
 
-        # Collect ping results
-        print("Collecting ping results...")
-        for o in ctrl.responses(timeout=timedelta(seconds=PING_TIMEOUT)):
-            if not isinstance(o, ScamperPing):
-                continue  # skip non-ping responses
-            vp_name = o.inst.name if hasattr(o.inst, 'name') else str(o.inst)
-            measurement = _ensure_measurement(ip_results, vp_name, o.dst, resolver, cycle_start_iso)
-            measurement.avg_rtt_ms = (o.avg_rtt.total_seconds()*1000 if o.avg_rtt else None)
-            measurement.min_rtt_ms = (o.min_rtt.total_seconds()*1000 if o.min_rtt else None)
-            measurement.stddev_rtt_ms = (o.stddev_rtt.total_seconds()*1000 if o.stddev_rtt else None)
-            measurement.resolver = resolver or 'local'
+            print("scheduling traceroute Measurements to resolved IPs...")
+            # traceroute to each resolved IP
+            for vp, addrs in dns_results.items():
+                for ip in addrs:
+                    ctrl.do_trace(ip, inst=vp)
 
-        print("scheduling traceroute Measurements to resolved IPs...")
-        # traceroute to each resolved IP
-        for vp, addrs in dns_results.items():
-            for ip in addrs:
-                ctrl.do_trace(ip, inst=vp)
-
-        
-        print("Adding carbon intensity data to resolved IPs...")
-        # add carbon intensity data
-        for _vp_name, ips in ip_results.items():
-            for ip_str, measurement in ips.items():
-                # fetch GEO data
-                try:
-                    geo = IP_GEO_CACHE.get(ip_str)
-                    if geo is None:
-                        details = handler.getDetails(ip_str)
-                        geo = {
-                            "latitude": details.latitude,
-                            "longitude": details.longitude,
-                            "country": details.country,
-                        }
-                        IP_GEO_CACHE[ip_str] = geo
-
-                    latitude = geo["latitude"]
-                    longitude = geo["longitude"]
-                    country_val = geo["country"]
-                    measurement.country = country_val
-                except Exception as e:
-                        measurement.co2_moer = None
-                        print(f"Error fetching GEO data for IP {ip_str}: {e}")
-
-                # fetch watttime region
-                region = lookup_wt_region(latitude, longitude)
-                
-                # Skip duplicate lookups within the same cycle by using a simple cache keyed by region string
-                cache_entry = carbon_cache.get(region)
-                if cache_entry:
-                    measurement.co2_moer = cache_entry.get("co2_moer")
-                    measurement.co2_aoer = cache_entry.get("co2_aoer")
-                else:
-                    moer_val = measurement.co2_moer
-                    aoer_val = measurement.co2_aoer
-
-                
-                # fetch recent co2_moer values if not already present
-                if moer_val is None:
+            
+            print("Adding carbon intensity data to resolved IPs...")
+            # add carbon intensity data
+            for _vp_name, ips in ip_results.items():
+                for ip_str, measurement in ips.items():
+                    # fetch GEO data
                     try:
-                        moer_list_recent = fetch_signal(region, WT_TOKEN, signal_type="co2_moer", offset_hours=1)
-                        moer = None
-                        if moer_list_recent:
-                            for val in reversed(moer_list_recent):
-                                if val is not None:
-                                    moer = val
-                                    break
-                        moer_val = moer
-                        measurement.co2_moer = moer_val
+                        geo = IP_GEO_CACHE.get(ip_str)
+                        if geo is None:
+                            details = handler.getDetails(ip_str)
+                            geo = {
+                                "latitude": details.latitude,
+                                "longitude": details.longitude,
+                                "country": details.country,
+                            }
+                            IP_GEO_CACHE[ip_str] = geo
+
+                        latitude = geo["latitude"]
+                        longitude = geo["longitude"]
+                        country_val = geo["country"]
+                        measurement.country = country_val
                     except Exception as e:
-                        measurement.co2_moer = None
-                        print(f"Error fetching moer for IP {ip_str}: {e}")
+                            measurement.co2_moer = None
+                            print(f"Error fetching GEO data for IP {ip_str}: {e}")
 
-                    # try:
-                    #     # fetch co2_aoer value if not already present
-                    #     if aoer_val is None:
-                    #         aoer_val = fetch_signal(latitude, longitude, EM_TOKEN, signal_type="co2_aoer")
-                    #         measurement.co2_aoer = aoer_val
+                    # fetch watttime region
+                    region = lookup_wt_region(latitude, longitude)
+                    
+                    # Skip duplicate lookups within the same cycle by using a simple cache keyed by region string
+                    cache_entry = carbon_cache.get(region)
+                    if cache_entry:
+                        measurement.co2_moer = cache_entry.get("co2_moer")
+                        measurement.co2_aoer = cache_entry.get("co2_aoer")
+                    else:
+                        moer_val = measurement.co2_moer
+                        aoer_val = measurement.co2_aoer
 
-                    # except Exception as e:
-                    #     measurement.co2_aoer = None
-                    #     print(f"Error fetching aoer for IP {ip_str}: {e}")
+                    
+                    # fetch recent co2_moer values if not already present
+                    if moer_val is None:
+                        try:
+                            moer_list_recent = fetch_signal(region, WT_TOKEN, signal_type="co2_moer", offset_hours=1)
+                            moer = None
+                            if moer_list_recent:
+                                for val in reversed(moer_list_recent):
+                                    if val is not None:
+                                        moer = val
+                                        break
+                            moer_val = moer
+                            measurement.co2_moer = moer_val
+                        except Exception as e:
+                            measurement.co2_moer = None
+                            print(f"Error fetching moer for IP {ip_str}: {e}")
 
-                    carbon_cache[region] = {
-                        "co2_moer": moer_val,
-                        "co2_aoer": aoer_val,
-                    }
+                        # try:
+                        #     # fetch co2_aoer value if not already present
+                        #     if aoer_val is None:
+                        #         aoer_val = fetch_signal(latitude, longitude, EM_TOKEN, signal_type="co2_aoer")
+                        #         measurement.co2_aoer = aoer_val
 
-                carbon_value = _select_carbon_value(measurement, carbon_basis)
-                _update_green_list(green_ip_list, measurement, carbon_basis, green_list_size)
-        
-        print("Collecting traceroute results...")
-        for o in ctrl.responses(timeout=timedelta(seconds=TRACEROUTE_TIMEOUT)):
-            if not isinstance(o, ScamperTrace):
-                continue  # skip non-traceroute responses
-            vp_name = o.inst.name if hasattr(o.inst, 'name') else str(o.inst)
-            measurement = _ensure_measurement(ip_results, vp_name, o.dst, resolver, cycle_start_iso)
-            measurement.hop_count = (o.hop_count if o.hop_count else None)
+                        # except Exception as e:
+                        #     measurement.co2_aoer = None
+                        #     print(f"Error fetching aoer for IP {ip_str}: {e}")
 
-        for e in ctrl.exceptions():
-            print(f"Error during measurements: {e}")
+                        carbon_cache[region] = {
+                            "co2_moer": moer_val,
+                            "co2_aoer": aoer_val,
+                        }
+
+                    carbon_value = _select_carbon_value(measurement, carbon_basis)
+                    _update_green_list(green_ip_list, measurement, carbon_basis, green_list_size)
+            
+            print("Collecting traceroute results...")
+            for o in ctrl.responses(timeout=timedelta(seconds=TRACEROUTE_TIMEOUT)):
+                if not isinstance(o, ScamperTrace):
+                    continue  # skip non-traceroute responses
+                vp_name = o.inst.name if hasattr(o.inst, 'name') else str(o.inst)
+                measurement = _ensure_measurement(ip_results, vp_name, o.dst, resolver, cycle_start_iso)
+                measurement.hop_count = (o.hop_count if o.hop_count else None)
+
+            for e in ctrl.exceptions():
+                print(f"Error during measurements: {e}")
 
 
     print("Scheduling pings to greenest IPs...")
@@ -476,14 +481,6 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", re
                 measurement.co2_aoer = item.co2_aoer if carbon_basis == "aoer" else None
                 break
 
-    # print results
-    # print("All candidates latencies and hop counts:")
-    # for vp, l in ip_results.items():
-    #     print(f"From VP: {vp.name}")
-    #     for ip, metrics in l.items():
-    #         rtt_ms = metrics.get('avg_rtt_ms')
-    #         hop_count = metrics.get('hop_count')
-    #         print(f"\t{ip:20} RTT: {rtt_ms} ms, Hops: {hop_count}")
 
     # Export results to CSV
     export_results_to_csv(ip_results, filename=output_file.replace('.warts', '.csv'), append=append_csv)
@@ -495,7 +492,7 @@ def measure_vp(mux_path, target, output_file="/home/gdns/gdns/results.warts", re
     ctrl.done()
     
 
-def run_cycles(mux_path, target, output_file, resolvers, interval_minutes: int, cycles: int):
+def run_cycles(mux_path, target, output_file, resolvers, interval_minutes: int):
     """
     Run measurements every interval_minutes for a fixed number of cycles.
     Each cycle uses the planned start time as its timestamp; if a cycle runs long,
@@ -509,7 +506,7 @@ def run_cycles(mux_path, target, output_file, resolvers, interval_minutes: int, 
     while True:
         cfg = load_config(CONFIG_PATH)
         apply_config(cfg)
-        current_target = cfg.get("domain", target)
+        current_targets = cfg.get("domain", target)
         current_resolvers = cfg.get("resolvers", resolvers)
         current_output = cfg.get("output_file", output_file)
         current_interval_minutes = cfg.get("interval_minutes", interval_minutes)
@@ -523,7 +520,7 @@ def run_cycles(mux_path, target, output_file, resolvers, interval_minutes: int, 
             time.sleep(sleep_seconds)
         planned_start_iso = cycle_start.isoformat()
         print(f"Starting cycle {i+1} scheduled at {planned_start_iso}| now: {datetime.now(timezone.utc).isoformat()}")
-        measure_vp(mux_path, current_target, output_file=current_output, resolvers=current_resolvers, cycle_start_iso=planned_start_iso, append_csv=True)
+        measure_vp(mux_path, current_targets, output_file=current_output, resolvers=current_resolvers, cycle_start_iso=planned_start_iso, append_csv=True)
         print(f"Completed cycle {i+1} at {datetime.now(timezone.utc).isoformat()}")
         i += 1
 
@@ -540,5 +537,4 @@ if __name__ == "__main__":
         output_file=cfg.get("output_file", default_output_file),
         resolvers=cfg.get("resolvers", resolvers),
         interval_minutes=cfg.get("interval_minutes", default_interval_minutes),
-        cycles=cfg.get("cycles", default_cycles),
     )

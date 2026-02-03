@@ -4,7 +4,7 @@
   "traceroute_timeout": 120,
   "em_token": "ptTcw6cZ9zS07WgBYgXP",
   "ipinfo_token": "6259fe15f8d92f",
-  "domain": "www.youtube.com",
+  "domain": ["www.youtube.com", "tiktok.com"],
   "resolvers": ["local", "1.1.1.1", "9.9.9.9", "45.90.28.23"],
   "login_url": "https://api.watttime.org/login",
   "access_url": "https://api.watttime.org/v3/my-access",
@@ -16,7 +16,6 @@
   "limit_vps": null,
   "output_file": "/home/gdns/gdns/results/results.warts",
   "interval_minutes": 30,
-  "cycles": 48,
   "green_list_size": 5,
   "carbon_basis": "moer"
 }
