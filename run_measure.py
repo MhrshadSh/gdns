@@ -4,7 +4,7 @@ import os
 import time
 import json
 from datetime import timedelta, timezone, datetime
-from typing import Optional, Dict
+from typing import List, Optional, Dict
 from dataclasses import dataclass
 from scamper import ScamperCtrl, ScamperFile, ScamperTrace, ScamperHost, ScamperPing
 from collections import defaultdict
@@ -189,6 +189,7 @@ def fetch_signal(region, token, signal_type="co2_moer", offset_hours=1):
 
 @dataclass
 class IPMeasurement:
+    domain: str
     dest: str
     version: str
     resolver: str
@@ -224,23 +225,24 @@ def _update_green_list(green_list: list[IPMeasurement], measurement: IPMeasureme
     if carbon_value is None:
         return
     entry = measurement
+    target = measurement.domain
 
     # If IP already exists, keep the greener (lower) value
-    for idx, item in enumerate(green_list):
+    for idx, item in enumerate(green_list[target]):
         existing_ip = item.dest
         if existing_ip == measurement.dest:
             if carbon_value < _select_carbon_value(item, carbon_basis):
-                green_list[idx] = entry
+                green_list[target][idx] = entry
             break
     else:
-        green_list.append(entry)
+        green_list[target].append(entry)
 
-    green_list.sort(key=lambda x: x.co2_moer)
-    if len(green_list) > max_size:
-        green_list.pop()  # remove the least green (largest carbon value)
+    green_list[target].sort(key=lambda x: x.co2_moer)
+    if len(green_list[target]) > max_size:
+        green_list[target].pop()  # remove the least green (largest carbon value)
 
 
-def _ensure_measurement(ip_results: Dict[str, Dict[str, IPMeasurement]], vp_name, ip, resolver, cycle_start_iso) -> IPMeasurement:
+def _ensure_measurement(ip_results: Dict[str, Dict[str, IPMeasurement]], vp_name, domain, ip, resolver, cycle_start_iso) -> IPMeasurement:
     """
     Ensure we have a measurement object for a vp/ip pair. This keeps all metrics in one place.
     """
@@ -248,7 +250,7 @@ def _ensure_measurement(ip_results: Dict[str, Dict[str, IPMeasurement]], vp_name
     measurement = ip_results[vp_name].get(dest)
     if measurement is None:
         version = 'IPv6' if getattr(ip, "is_ipv6", lambda: False)() else 'IPv4'
-        measurement = IPMeasurement(dest=dest, version=version, resolver=resolver or 'local', cycle_start_iso=cycle_start_iso)
+        measurement = IPMeasurement(domain=domain, dest=dest, version=version, resolver=resolver or 'local', cycle_start_iso=cycle_start_iso)
         ip_results[vp_name][dest] = measurement
     else:
         if not measurement.resolver:
@@ -265,6 +267,7 @@ def export_results_to_csv(ip_results, filename="results.csv", append: bool = Fal
         for measurement in ips_dict.values():
             rows.append({
                 'vp': vp_name,
+                'domain': measurement.domain,
                 'dest': measurement.dest,
                 'version': measurement.version,
                 'resolver': measurement.resolver,
@@ -280,7 +283,7 @@ def export_results_to_csv(ip_results, filename="results.csv", append: bool = Fal
             })
     
     if rows:
-        fieldnames = ['vp', 'dest', 'version', 'resolver', 'cycle_start_iso', 'dest_country', 'avg_rtt_ms', 'min_rtt_ms', 'stddev_rtt_ms', 'hop_count', 'co2_moer', 'co2_aoer', 'gip']
+        fieldnames = ['vp', 'domain', 'dest', 'version', 'resolver', 'cycle_start_iso', 'dest_country', 'avg_rtt_ms', 'min_rtt_ms', 'stddev_rtt_ms', 'hop_count', 'co2_moer', 'co2_aoer', 'gip']
         mode = 'a' if append and os.path.exists(filename) else 'w'
         write_header = not (append and os.path.exists(filename))
         with open(filename, mode, newline='') as f:
@@ -315,7 +318,7 @@ def measure_vp(mux_path: str,
     resolver_results = defaultdict(lambda: defaultdict(set))  # vp -> resolver -> set of resolved IPs
     ip_results: Dict[str, Dict[str, IPMeasurement]] = defaultdict(dict)  # vp -> ip -> measurement dataclass
     carbon_cache: Dict[str, Dict[str, Optional[float]]] = {}  # per-cycle cache to avoid duplicate carbon lookups
-    green_ip_list = []
+    green_ip_list = defaultdict(list)  # list of greenest IPs for a domain
 
     for target in targets:
         for resolver in resolvers:
@@ -361,7 +364,7 @@ def measure_vp(mux_path: str,
                 if not isinstance(o, ScamperPing):
                     continue  # skip non-ping responses
                 vp_name = o.inst.name if hasattr(o.inst, 'name') else str(o.inst)
-                measurement = _ensure_measurement(ip_results, vp_name, o.dst, resolver, cycle_start_iso)
+                measurement = _ensure_measurement(ip_results, vp_name, target, o.dst, resolver, cycle_start_iso)
                 measurement.avg_rtt_ms = (o.avg_rtt.total_seconds()*1000 if o.avg_rtt else None)
                 measurement.min_rtt_ms = (o.min_rtt.total_seconds()*1000 if o.min_rtt else None)
                 measurement.stddev_rtt_ms = (o.stddev_rtt.total_seconds()*1000 if o.stddev_rtt else None)
@@ -450,36 +453,36 @@ def measure_vp(mux_path: str,
                 if not isinstance(o, ScamperTrace):
                     continue  # skip non-traceroute responses
                 vp_name = o.inst.name if hasattr(o.inst, 'name') else str(o.inst)
-                measurement = _ensure_measurement(ip_results, vp_name, o.dst, resolver, cycle_start_iso)
+                measurement = _ensure_measurement(ip_results, vp_name, target, o.dst, resolver, cycle_start_iso)
                 measurement.hop_count = (o.hop_count if o.hop_count else None)
 
             for e in ctrl.exceptions():
                 print(f"Error during measurements: {e}")
 
 
-    print("Scheduling pings to greenest IPs...")
-    for i in ctrl.instances():
-        for entry in green_ip_list:
-            ctrl.do_ping(entry.dest, inst=i)
+        print("Scheduling pings to greenest IPs...")
+        for i in ctrl.instances():
+            for entry in green_ip_list[target]:
+                ctrl.do_ping(entry.dest, inst=i)
 
-    # Collect green ping results
-    print("Collecting green ping results...")
-    for o in ctrl.responses(timeout=timedelta(seconds=PING_TIMEOUT)):
-        if not isinstance(o, ScamperPing):
-            continue  # skip non-ping responses
-        vp_name = o.inst.name if hasattr(o.inst, 'name') else str(o.inst)
-        ip_str = str(o.dst)
-        measurement = _ensure_measurement(ip_results, vp_name, o.dst, resolver, cycle_start_iso)
-        measurement.avg_rtt_ms = (o.avg_rtt.total_seconds()*1000 if o.avg_rtt else None)
-        measurement.min_rtt_ms = (o.min_rtt.total_seconds()*1000 if o.min_rtt else None)
-        measurement.stddev_rtt_ms = (o.stddev_rtt.total_seconds()*1000 if o.stddev_rtt else None)
-        measurement.gip = True  # mark as green IP
-        # ensure carbon info present on green IP measurements as well
-        for item in green_ip_list:
-            if item.dest == ip_str:
-                measurement.co2_moer = item.co2_moer if carbon_basis == "moer" else None
-                measurement.co2_aoer = item.co2_aoer if carbon_basis == "aoer" else None
-                break
+        # Collect green ping results
+        print("Collecting green ping results...")
+        for o in ctrl.responses(timeout=timedelta(seconds=PING_TIMEOUT)):
+            if not isinstance(o, ScamperPing):
+                continue  # skip non-ping responses
+            vp_name = o.inst.name if hasattr(o.inst, 'name') else str(o.inst)
+            ip_str = str(o.dst)
+            measurement = _ensure_measurement(ip_results, vp_name, target, o.dst, resolver, cycle_start_iso)
+            measurement.avg_rtt_ms = (o.avg_rtt.total_seconds()*1000 if o.avg_rtt else None)
+            measurement.min_rtt_ms = (o.min_rtt.total_seconds()*1000 if o.min_rtt else None)
+            measurement.stddev_rtt_ms = (o.stddev_rtt.total_seconds()*1000 if o.stddev_rtt else None)
+            measurement.gip = True  # mark as green IP
+            # ensure carbon info present on green IP measurements as well
+            for item in green_ip_list[target]:
+                if item.dest == ip_str:
+                    measurement.co2_moer = item.co2_moer if carbon_basis == "moer" else None
+                    measurement.co2_aoer = item.co2_aoer if carbon_basis == "aoer" else None
+                    break
 
 
     # Export results to CSV
