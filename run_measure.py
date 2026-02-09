@@ -12,6 +12,7 @@ import ipinfo
 import requests
 from requests.auth import HTTPBasicAuth
 from wt_region_lookup import lookup_wt_region
+from upload_results import upload_results
 
 
 
@@ -495,7 +496,7 @@ def measure_vp(mux_path: str,
     ctrl.done()
     
 
-def run_cycles(mux_path, target, output_file, resolvers, interval_minutes: int):
+def run_cycles(mux_path, target, resolvers, interval_minutes: int):
     """
     Run measurements every interval_minutes for a fixed number of cycles.
     Each cycle uses the planned start time as its timestamp; if a cycle runs long,
@@ -506,17 +507,20 @@ def run_cycles(mux_path, target, output_file, resolvers, interval_minutes: int):
     load_ip_geo_cache(IP_GEO_CACHE_PATH)
 
     i = 0
+    last_upload_date = None
+
     while True:
+        now = datetime.now(timezone.utc)
         cfg = load_config(CONFIG_PATH)
         apply_config(cfg)
         current_targets = cfg.get("domain", target)
         current_resolvers = cfg.get("resolvers", resolvers)
-        current_output = cfg.get("output_file", output_file)
+        current_output = f"/home/gdns/gdns/results/{now.date()}.warts"
         current_interval_minutes = cfg.get("interval_minutes", interval_minutes)
         
         # adjust planned start based on possibly updated interval
         cycle_start = first_start + timedelta(minutes=current_interval_minutes * i)
-        now = datetime.now(timezone.utc)
+        
         if now < cycle_start:
             sleep_seconds = (cycle_start - now).total_seconds()
             print(f"Waiting {sleep_seconds:.1f}s for next cycle start at {cycle_start.isoformat()}")
@@ -525,19 +529,23 @@ def run_cycles(mux_path, target, output_file, resolvers, interval_minutes: int):
         print(f"Starting cycle {i+1} scheduled at {planned_start_iso}| now: {datetime.now(timezone.utc).isoformat()}")
         measure_vp(mux_path, current_targets, output_file=current_output, resolvers=current_resolvers, cycle_start_iso=planned_start_iso, append_csv=True)
         print(f"Completed cycle {i+1} at {datetime.now(timezone.utc).isoformat()}")
+
+        last_upload_date = upload_results(
+            current_output,
+            last_upload_date,
+        )
+
         i += 1
 
     
 
 
 if __name__ == "__main__":
-    # Example: run every 10 minutes for 3 cycles
     cfg = load_config(CONFIG_PATH)
     apply_config(cfg)
     run_cycles(
         "/run/ark/mux",
         target=cfg.get("domain", domain),
-        output_file=cfg.get("output_file", default_output_file),
         resolvers=cfg.get("resolvers", resolvers),
         interval_minutes=cfg.get("interval_minutes", default_interval_minutes),
     )
