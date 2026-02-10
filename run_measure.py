@@ -299,14 +299,16 @@ def export_results_to_csv(ip_results, filename="results.csv", append: bool = Fal
 
 def measure_vp(mux_path: str, 
                targets: list, 
-               output_file="/home/gdns/gdns/results.warts", 
+               output_file="/home/gdns/gdns/results/results.csv", 
                resolvers: list=["local"], 
                cycle_start_iso: Optional[str] = None, 
                append_csv: bool = True
                ):
     
-
-    outfile = ScamperFile(filename=output_file, mode='w')
+    dir = f"./results/warts{datetime.now(timezone.utc).date()}"
+    os.makedirs(dir, exist_ok=True)
+    sc_file = f"{dir}/{int(datetime.now(timezone.utc).timestamp())}.warts.gz"
+    outfile = ScamperFile(filename=sc_file, mode='w')
     ctrl = ScamperCtrl(mux=mux_path, outfile=outfile)
     # Select only DNS-capable vantage points
     vps = [vp for vp in ctrl.vps() if 'primitive:dns' in vp.tags]
@@ -487,7 +489,7 @@ def measure_vp(mux_path: str,
 
 
     # Export results to CSV
-    export_results_to_csv(ip_results, filename=output_file.replace('.warts', '.csv'), append=append_csv)
+    export_results_to_csv(ip_results, filename=output_file, append=append_csv)
     # After each cycle, persist updated geolocation cache for next execution
     save_ip_geo_cache(IP_GEO_CACHE_PATH)
 
@@ -507,7 +509,7 @@ def run_cycles(mux_path, target, resolvers, interval_minutes: int):
     load_ip_geo_cache(IP_GEO_CACHE_PATH)
 
     i = 0
-    last_upload_date = None
+    last_upload_date = datetime.now(timezone.utc).date() 
 
     while True:
         now = datetime.now(timezone.utc)
@@ -515,7 +517,7 @@ def run_cycles(mux_path, target, resolvers, interval_minutes: int):
         apply_config(cfg)
         current_targets = cfg.get("domain", target)
         current_resolvers = cfg.get("resolvers", resolvers)
-        current_output = f"/home/gdns/gdns/results/{now.date()}.warts"
+        current_output = f"./results/{now.date()}.csv"
         current_interval_minutes = cfg.get("interval_minutes", interval_minutes)
         
         # adjust planned start based on possibly updated interval

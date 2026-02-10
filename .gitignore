@@ -2,6 +2,7 @@
 *.warts
 *.pcap
 *.json
+*.gz
 
 
 # Ignore python cache files

@@ -1,6 +1,7 @@
-from datetime import datetime, timezone, date
+from datetime import datetime, timedelta, timezone, date
 import subprocess
 from pathlib import Path
+import glob
 
 
 def upload_results(
@@ -19,14 +20,39 @@ def upload_results(
     if not Path(output_file).exists():
         print("No output file to upload yet")
         return last_upload_date
+    
+    # aggregate the warts files into a single file for the day
+   
+    warts_files = sorted(
+        glob.glob(f"./results/warts{today - timedelta(days=1)}/*.warts.gz")
+    )
+
+    if not warts_files:
+        raise RuntimeError("No WARTS files found to merge")
+
+    cmd = [
+        "sc_wartscat",
+        *warts_files,
+        "-o",
+        output_file.replace(".csv", ".warts"),
+    ]
+
+    subprocess.run(cmd, check=True)
+
+        
+
 
     print(f"Uploading daily results for {today.isoformat()}")
+    
+    # gzip the files before uploading
+    subprocess.run(["gzip", "-f", output_file], check=True)
+    subprocess.run(["gzip", "-f", output_file.replace(".csv", ".warts")], check=True)
 
     result = subprocess.run(
         [
             "./mc",
             "cp",
-            output_file,
+            output_file.replace(".csv", ".warts.gz"),
             "storage/shakerim-gdns/daily-results/",
         ],
         capture_output=True,
@@ -37,16 +63,21 @@ def upload_results(
         print("Upload failed:", result.stderr)
         return last_upload_date
     
-    results = subprocess.run(
+    result = subprocess.run(
         [
             "./mc",
             "cp",
-            output_file.replace(".warts", ".csv"),
+            output_file.replace(".csv", ".csv.gz"),
             "storage/shakerim-gdns/daily-results/",
         ],
         capture_output=True,
         text=True,
     )
+
+    if result.returncode != 0:
+        print("Upload failed:", result.stderr)
+        return last_upload_date
+    
 
 
     print("Upload successful")
