@@ -8,7 +8,7 @@ from typing import List, Optional, Dict
 from dataclasses import dataclass
 from scamper import ScamperCtrl, ScamperFile, ScamperTrace, ScamperHost, ScamperPing
 from collections import defaultdict
-import ipinfo
+import ipinfo, ipaddress
 import requests
 from requests.auth import HTTPBasicAuth
 from wt_region_lookup import lookup_wt_region
@@ -206,16 +206,14 @@ class IPMeasurement:
     gip: Optional[bool] = False  # green IP flag
 
 
-def _select_carbon_value(measurement: IPMeasurement, basis: str) -> Optional[float]:
-    """
-    Pick the carbon intensity to use for ranking based on the configured basis.
-    Falls back to the other value if the preferred basis is missing.
-    """
-    basis_lower = (basis or "moer").lower()
-    if basis_lower == "aoer":
-        return measurement.co2_aoer if measurement.co2_aoer is not None else measurement.co2_moer
-    # default to moer
-    return measurement.co2_moer if measurement.co2_moer is not None else measurement.co2_aoer
+def normalize_ip_for_geo(ip_str: str) -> str:
+    try:
+        ip_obj = ipaddress.ip_address(ip_str)
+        if isinstance(ip_obj, ipaddress.IPv6Address) and ip_obj.ipv4_mapped:
+            return str(ip_obj.ipv4_mapped)  # convert ::ffff:146.112.61.104 -> 146.112.61.104
+        return str(ip_obj)
+    except ValueError:
+        return ip_str
 
 
 def _update_green_list(green_list: dict[str, list[IPMeasurement]], measurement: IPMeasurement, max_size: int):
@@ -388,11 +386,17 @@ def measure_vp(mux_path: str,
             # add carbon intensity data
             for _vp_name, ips in ip_results.items():
                 for ip_str, measurement in ips.items():
+                    ip_str = normalize_ip_for_geo(ip_str)
                     # fetch GEO data
                     try:
                         geo = IP_GEO_CACHE.get(ip_str)
                         if geo is None:
                             details = handler.getDetails(ip_str)
+
+                            # skip if geo fields are missing
+                            if not hasattr(details, "latitude") or not hasattr(details, "longitude"):
+                                raise ValueError("Missing latitude/longitude in GEO response")
+                            
                             geo = {
                                 "latitude": details.latitude,
                                 "longitude": details.longitude,
