@@ -51,7 +51,7 @@ def upload_results(
     result = subprocess.run(
         [
             "./mc",
-            "cp",
+            "mv",
             output_file.replace(".csv", ".warts.gz"),
             "storage/shakerim-gdns/daily-results/",
         ],
@@ -66,7 +66,7 @@ def upload_results(
     result = subprocess.run(
         [
             "./mc",
-            "cp",
+            "mv",
             output_file.replace(".csv", ".csv.gz"),
             "storage/shakerim-gdns/daily-results/",
         ],

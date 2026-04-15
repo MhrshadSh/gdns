@@ -217,12 +217,12 @@ def _select_carbon_value(measurement: IPMeasurement, basis: str) -> Optional[flo
     return measurement.co2_moer if measurement.co2_moer is not None else measurement.co2_aoer
 
 
-def _update_green_list(green_list: list[IPMeasurement], measurement: IPMeasurement, carbon_basis: str, max_size: int):
+def _update_green_list(green_list: dict[str, list[IPMeasurement]], measurement: IPMeasurement, carbon_basis: str, max_size: int):
     """
     Maintain a fixed-size list of the greenest IPs (lowest carbon intensity).
     If the list exceeds max_size, drop the entry with the highest carbon value.
     """
-    carbon_value = _select_carbon_value(measurement, carbon_basis)
+    carbon_value = measurement.co2_moer
     if carbon_value is None:
         return
     entry = measurement
